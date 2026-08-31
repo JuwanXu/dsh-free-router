@@ -1,12 +1,11 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { Context, Logger } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-llm'
+import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { CatalogRegistry } from './catalog/registry.js'
-import { NvidiaCatalogSource } from './catalog/nvidia.js'
-import { OpenRouterCatalogSource } from './catalog/openrouter.js'
 import {
   Config as ConfigSchema,
   FREE_ROUTER_SETTINGS_NAMESPACE,
@@ -17,6 +16,10 @@ import { HealthBook } from './health.js'
 import { FileRouterCache } from './persistence/cache.js'
 import { createRouterRuntime } from './runtime/router.js'
 import { candidateKey, type CandidateModel } from './types.js'
+import type { RouterFailoverEvent, RouterSelectionEvent } from './runtime/router.js'
+import { providerCatalogSources, providerConfig, providerDescriptors } from './providers.js'
+import type { FreeRouterMetrics } from './events.js'
+import './events.js'
 
 export const name = 'free-router'
 export const inject = ['llm']
@@ -24,43 +27,39 @@ export const Config = ConfigSchema
 export { FREE_ROUTER_SETTINGS_NAMESPACE }
 export type { RouterConfig }
 
-const catalog = new CatalogRegistry([
-  new NvidiaCatalogSource(),
-  new OpenRouterCatalogSource(),
-])
+const catalog = new CatalogRegistry(providerCatalogSources())
 
-async function executableModels(ctx: Context, config: RouterConfig): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
-  const routes = [
-    ['openrouter', config.providers.openrouter.route],
-    ['nvidia', config.providers.nvidia.route],
-  ] as const
+async function executableModels(
+  ctx: Context,
+  config: RouterConfig,
+  previous: readonly CandidateModel[] = [],
+): Promise<ReadonlyMap<string, ReadonlySet<string>>> {
   const activeRoutes = new Set(ctx.llm.listProviders().map((provider) => provider.id))
   const result = new Map<string, ReadonlySet<string>>()
-  await Promise.all(routes.map(async ([source, route]) => {
+  await Promise.all(providerDescriptors.map(async ({ key, source }) => {
+    const route = providerConfig(config, key).route
     if (!activeRoutes.has(route)) {
       result.set(source, new Set())
       return
     }
-    const models = await ctx.llm.listModels(route)
-    result.set(source, new Set(models.map((model) => model.id)))
+    try {
+      const models = await ctx.llm.listModels(route)
+      result.set(source, new Set(models.map((model) => model.id)))
+    } catch {
+      result.set(source, new Set(previous.filter((candidate) => candidate.provider === source).map((candidate) => candidate.model)))
+    }
   }))
   return result
 }
 
 function routeCatalogCandidates(candidates: readonly CandidateModel[], config: RouterConfig): CandidateModel[] {
-  const routes: Record<string, string> = {
-    openrouter: config.providers.openrouter.route,
-    nvidia: config.providers.nvidia.route,
-  }
-  return candidates.map((candidate) => ({ ...candidate, provider: routes[candidate.provider] ?? candidate.provider }))
+  const routes = new Map<string, string>(providerDescriptors.map(({ key, source }) => [source, providerConfig(config, key).route]))
+  return candidates.map((candidate) => ({ ...candidate, provider: routes.get(candidate.provider) ?? candidate.provider }))
 }
 
 function sourceCatalogCandidates(candidates: readonly CandidateModel[], config: RouterConfig): CandidateModel[] {
-  const sources: Record<string, string> = {
-    [config.providers.openrouter.route]: 'openrouter',
-    [config.providers.nvidia.route]: 'nvidia',
-  }
-  return candidates.map((candidate) => ({ ...candidate, provider: sources[candidate.provider] ?? candidate.provider }))
+  const sources = new Map<string, string>(providerDescriptors.map(({ key, source }) => [providerConfig(config, key).route, source]))
+  return candidates.map((candidate) => ({ ...candidate, provider: sources.get(candidate.provider) ?? candidate.provider }))
 }
 
 /** Register request-level free-model routing on top of existing DSH LLM adapters. */
@@ -87,7 +86,14 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     getCandidates: () => candidates,
     health,
     onHealthChange: persistCache,
-    onUnknownModel: () => triggerRefresh(),
+    onUnknownModel: (unknown) => {
+      const unknownKey = candidateKey(unknown)
+      candidates = candidates.filter((candidate) => candidateKey(candidate) !== unknownKey)
+      persistCache()
+      triggerRefresh()
+    },
+    onSelected: (event) => appendSelectionEvent(event, logger),
+    onFailover: (event) => appendFailoverEvent(event, logger),
     probe: async (candidate, lifecycleSignal) => {
       const startedAt = Date.now()
       const signal = AbortSignal.any([lifecycleSignal, AbortSignal.timeout(current().health.timeoutMs)])
@@ -117,12 +123,14 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     const generation = ++refreshGeneration
     const config = current()
     try {
-      const executable = await executableModels(ctx, config)
-      const discovered = await catalog.refresh(executable, refreshAbort.signal, sourceCatalogCandidates(candidates, config))
+      const previous = sourceCatalogCandidates(candidates, config)
+      const executable = await executableModels(ctx, config, previous)
+      const discovered = await catalog.refresh(executable, refreshAbort.signal, previous)
       if (generation === refreshGeneration && !refreshAbort.signal.aborted) {
         candidates = routeCatalogCandidates(discovered, config)
         initialRefreshCompleted = true
         persistCache()
+        runtime.wake()
       }
     } catch (error) {
       if (!refreshAbort.signal.aborted) logger.warn(`free-router: model catalog refresh failed; keeping last known candidates: ${String(error)}`)
@@ -133,7 +141,11 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   ctx.on('agent/request', (payload, next) => runtime.onRequest(payload, next), true)
   ctx.on('agent/request-error', (payload, next) => runtime.onRequestError(payload, next), true)
   ctx.on('llm/stream', (options, next) => runtime.observeStream(options, next))
-  ctx.on('llm/adapters-updated', triggerRefresh)
+  ctx.on('llm/adapters-updated', () => {
+    const config = current()
+    for (const { key } of providerDescriptors) health.clearProvider(providerConfig(config, key).route)
+    triggerRefresh()
+  })
   ctx.effect(() => () => refreshAbort.abort(), 'free-router: catalog refresh cancellation')
   ctx.effect(() => {
     runtime.start()
@@ -148,11 +160,58 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     })
   })
   void cache.load(Date.now()).then((record) => {
-    if (record === undefined) return
-    health.restore(record.health)
+    if (record === undefined || refreshAbort.signal.aborted || (record.stale === true && initialRefreshCompleted)) return
+    health.restore(record.health, { stale: record.stale === true })
     if (initialRefreshCompleted) return
     const known = new Set(candidates.map(candidateKey))
     candidates = [...candidates, ...record.candidates.filter((candidate) => !known.has(candidateKey(candidate)))]
-  })
+    runtime.wake()
+  }).catch((error) => logger.warn(`free-router: cache load failed: ${String(error)}`))
   void refresh()
+}
+
+function appendSelectionEvent(event: RouterSelectionEvent, logger: Logger): void {
+  const session = (event.agent as { session?: Session }).session
+  if (session === undefined) return
+  try {
+    session.append('free-router/selected', {
+      turn: event.turn,
+      step: event.step,
+      attempt: event.attempt,
+      provider: event.candidate.provider,
+      model: event.candidate.model,
+      reason: event.reason,
+      metrics: serializableMetrics(event.metrics),
+    })
+  } catch (error) {
+    logger.warn(`free-router: failed to append selection event: ${String(error)}`)
+  }
+}
+
+function serializableMetrics(metrics: RouterSelectionEvent['metrics']): FreeRouterMetrics {
+  return {
+    ...metrics,
+    averageFirstByteMs: Number.isFinite(metrics.averageFirstByteMs) ? metrics.averageFirstByteMs : null,
+  }
+}
+
+function appendFailoverEvent(event: RouterFailoverEvent, logger: Logger): void {
+  const session = (event.agent as { session?: Session }).session
+  if (session === undefined) return
+  try {
+    session.append('free-router/failover', {
+      turn: event.turn,
+      step: event.step,
+      attempt: event.attempt,
+      provider: event.failedCandidate.provider,
+      model: event.failedCandidate.model,
+      failureCode: event.failureCode,
+      isolatedScope: event.isolatedScope,
+      nextProvider: event.nextCandidate.provider,
+      nextModel: event.nextCandidate.model,
+      attempts: event.attempts,
+    })
+  } catch (error) {
+    logger.warn(`free-router: failed to append failover event: ${String(error)}`)
+  }
 }

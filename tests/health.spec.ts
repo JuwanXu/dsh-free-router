@@ -28,6 +28,18 @@ describe('HealthBook', () => {
     expect(book.isCooling('openrouter/a', 1_001)).toBe(false)
   })
 
+  it('includes provider cooling in snapshots for untouched sibling models', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+
+    book.record('nvidia/a', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_000)
+
+    expect(book.snapshot('nvidia/b', 1_001)).toMatchObject({ status: 'unavailable', coolingUntil: 1_100 })
+
+    const restored = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    restored.restore({ 'nvidia/b': book.snapshot('nvidia/b', 1_001) })
+    expect(restored.snapshot('nvidia/b', 2_000).status).toBe('unknown')
+  })
+
   it('caps exponential cooldown and retains a finite rolling latency average', () => {
     const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 250, sampleSize: 2 })
 
@@ -54,5 +66,32 @@ describe('HealthBook', () => {
     expect(book.snapshot('nvidia/a', 1_000)).toMatchObject({
       status: 'available', averageFirstByteMs: 120, successRate: 1,
     })
+  })
+
+  it('restores unknown latency encoded as JSON null and can clear provider cooling', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/a': {
+        status: 'unavailable', averageFirstByteMs: null as unknown as number, successRate: 0,
+        consecutiveFailures: 1, coolingUntil: 2_000,
+      },
+    })
+    expect(book.isCooling('nvidia/a', 1_500)).toBe(true)
+
+    book.clearProvider('nvidia')
+    expect(book.isCooling('nvidia/a', 1_500)).toBe(false)
+    expect(book.snapshot('nvidia/a', 1_500)).toMatchObject({ status: 'unknown', consecutiveFailures: 0 })
+  })
+
+  it('restores stale summaries as ranking hints without making them available', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/a': {
+        status: 'available', averageFirstByteMs: 120, successRate: 1,
+        consecutiveFailures: 0, coolingUntil: 0,
+      },
+    }, { stale: true })
+
+    expect(book.snapshot('nvidia/a', 1_000)).toMatchObject({ status: 'unknown', averageFirstByteMs: 120, successRate: 1 })
   })
 })

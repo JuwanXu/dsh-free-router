@@ -58,4 +58,24 @@ describe('rankCandidates', () => {
 
     expect(rankCandidates([zulu, alpha], new Map(), 1).map(({ model }) => model)).toEqual(['zulu', 'alpha'])
   })
+
+  it('keeps success-rate and id tie-breakers when both latencies are unknown', () => {
+    const lowSuccess = candidate('low-success', 'A')
+    const highSuccess = candidate('high-success', 'A')
+    const sameSuccessZulu = candidate('zulu', 'A')
+    const sameSuccessAlpha = candidate('alpha', 'A')
+
+    const ranked = rankCandidates(
+      [lowSuccess, highSuccess, sameSuccessZulu, sameSuccessAlpha],
+      new Map([
+        ['openrouter/low-success', metrics('unknown', Number.POSITIVE_INFINITY, 0.1)],
+        ['openrouter/high-success', metrics('unknown', Number.POSITIVE_INFINITY, 0.9)],
+        ['openrouter/zulu', metrics('unknown', Number.POSITIVE_INFINITY, 0.5)],
+        ['openrouter/alpha', metrics('unknown', Number.POSITIVE_INFINITY, 0.5)],
+      ]),
+      1,
+    )
+
+    expect(ranked.map(({ model }) => model)).toEqual(['high-success', 'alpha', 'zulu', 'low-success'])
+  })
 })

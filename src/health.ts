@@ -26,6 +26,11 @@ interface CandidateHealth {
   samples: Sample[]
   consecutiveFailures: number
   coolingUntil: number
+  restored?: {
+    status: string
+    averageFirstByteMs: number
+    successRate: number
+  }
 }
 
 function providerOf(candidateKey: string): string {
@@ -66,6 +71,7 @@ export class HealthBook {
       }
     }
 
+    delete health.restored
     this.candidates.set(candidateKey, health)
   }
 
@@ -78,12 +84,29 @@ export class HealthBook {
   snapshot(candidateKey: string, now: number): HealthSnapshot {
     const health = this.candidates.get(candidateKey)
     if (!health) {
+      const coolingUntil = this.providerCoolingUntil.get(providerOf(candidateKey)) ?? 0
       return {
-        status: 'unknown',
+        status: coolingUntil > now ? 'unavailable' : 'unknown',
         averageFirstByteMs: Number.POSITIVE_INFINITY,
         successRate: 0,
         consecutiveFailures: 0,
-        coolingUntil: 0,
+        coolingUntil,
+      }
+    }
+
+    if (health.samples.length === 0 && health.restored !== undefined) {
+      const coolingUntil = Math.max(
+        health.coolingUntil,
+        this.providerCoolingUntil.get(providerOf(candidateKey)) ?? 0,
+      )
+      return {
+        status: coolingUntil > now
+          ? 'unavailable'
+          : health.restored.status,
+        averageFirstByteMs: health.restored.averageFirstByteMs,
+        successRate: health.restored.successRate,
+        consecutiveFailures: health.consecutiveFailures,
+        coolingUntil,
       }
     }
 
@@ -115,18 +138,47 @@ export class HealthBook {
     }
   }
 
-  restore(snapshots: Readonly<Record<string, HealthSnapshot>>): void {
+  restore(
+    snapshots: Readonly<Record<string, HealthSnapshot>>,
+    options: { stale?: boolean } = {},
+  ): void {
+    const stale = options.stale === true
     for (const [key, snapshot] of Object.entries(snapshots)) {
-      if (!Number.isFinite(snapshot.averageFirstByteMs)
+      if ((typeof snapshot.averageFirstByteMs !== 'number'
+        && snapshot.averageFirstByteMs !== null)
         || !Number.isFinite(snapshot.successRate)
+        || snapshot.successRate < 0 || snapshot.successRate > 1
         || !Number.isInteger(snapshot.consecutiveFailures)
+        || snapshot.consecutiveFailures < 0
         || !Number.isFinite(snapshot.coolingUntil)) continue
-      const success = snapshot.status === 'available'
+      const averageFirstByteMs = snapshot.averageFirstByteMs === null
+        || !Number.isFinite(snapshot.averageFirstByteMs)
+        ? Number.POSITIVE_INFINITY
+        : Math.max(0, snapshot.averageFirstByteMs)
       this.candidates.set(key, {
-        samples: [{ success, ...(success ? { firstByteMs: snapshot.averageFirstByteMs } : {}) }],
-        consecutiveFailures: Math.max(0, snapshot.consecutiveFailures),
-        coolingUntil: Math.max(0, snapshot.coolingUntil),
+        samples: [],
+        consecutiveFailures: snapshot.consecutiveFailures,
+        coolingUntil: stale ? 0 : Math.max(0, snapshot.coolingUntil),
+        restored: {
+          status: stale || (snapshot.status === 'unavailable' && snapshot.consecutiveFailures === 0)
+            ? 'unknown'
+            : snapshot.status,
+          averageFirstByteMs,
+          successRate: snapshot.successRate,
+        },
       })
+    }
+  }
+
+  /** Clear provider-wide credential/quota isolation after adapter configuration changes. */
+  clearProvider(provider: string): void {
+    this.providerCoolingUntil.delete(provider)
+    for (const [key, health] of this.candidates) {
+      if (providerOf(key) !== provider) continue
+      health.samples = []
+      health.consecutiveFailures = 0
+      health.coolingUntil = 0
+      delete health.restored
     }
   }
 

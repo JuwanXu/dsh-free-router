@@ -43,10 +43,12 @@ export class OpenRouterCatalogSource {
     private readonly fetchImpl: FetchLike = fetch,
     private readonly endpoint = modelsEndpoint,
     private readonly now: () => number = Date.now,
+    private readonly timeoutMs = 6_000,
   ) {}
 
   async load(signal: AbortSignal): Promise<CandidateModel[]> {
-    const response = await this.fetchImpl(this.endpoint, { signal })
+    const requestSignal = AbortSignal.any([signal, AbortSignal.timeout(this.timeoutMs)])
+    const response = await this.fetchImpl(this.endpoint, { signal: requestSignal })
     if (!response.ok) throw new Error(`OpenRouter model directory returned HTTP ${response.status}`)
     const payload: unknown = await response.json()
     if (!payload || typeof payload !== 'object' || !Array.isArray((payload as { data?: unknown }).data)) {

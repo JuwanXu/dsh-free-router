@@ -1,4 +1,5 @@
 import z from '@deepseek-ai/schemastery'
+import { providerDescriptors } from './providers.js'
 import type { ModelTier } from './types.js'
 
 export const FREE_ROUTER_SETTINGS_NAMESPACE = 'free-router'
@@ -53,6 +54,7 @@ export const defaultConfig: RouterConfig = {
 }
 
 const tiers: ModelTier[] = ['S+', 'S', 'A+', 'A', 'A-', 'B+', 'B', 'C', '?']
+const providerKeys = new Set(providerDescriptors.map(({ key }) => key))
 
 /** DSH Settings schema, including defaults so an empty user section is usable. */
 export const Config: z<RouterConfig> = z.object({
@@ -114,7 +116,7 @@ export function parseConfig(value: unknown): RouterConfig {
   if (unknownTopLevel.length > 0) throw new TypeError(`unknown config fields: ${unknownTopLevel.join(', ')}`)
 
   const providersInput = mergeRecord(defaultConfig.providers, value.providers, 'providers')
-  const unknownProviders = Object.keys(providersInput).filter((key) => !['openrouter', 'nvidia'].includes(key))
+  const unknownProviders = Object.keys(providersInput).filter((key) => !providerKeys.has(key as typeof providerDescriptors[number]['key']))
   if (unknownProviders.length > 0) throw new TypeError(`unknown providers: ${unknownProviders.join(', ')}`)
   const readProvider = (name: 'openrouter' | 'nvidia'): ProviderConfig => {
     const input = mergeRecord(defaultConfig.providers[name], providersInput[name], `providers.${name}`)

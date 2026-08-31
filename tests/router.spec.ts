@@ -3,7 +3,7 @@ import { ReasoningEffortId, type LlmCallConfig } from '@deepseek-ai/dsh-llm'
 import { parseConfig } from '../src/config.js'
 import { HealthBook } from '../src/health.js'
 import { createRouterRuntime } from '../src/runtime/router.js'
-import type { CandidateModel } from '../src/types.js'
+import { candidateKey, type CandidateModel } from '../src/types.js'
 
 const signal = new AbortController().signal
 const original: LlmCallConfig = { provider: 'openrouter', model: 'user-selected', reasoningEffort: ReasoningEffortId('high') }
@@ -82,6 +82,23 @@ describe('RouterRuntime', () => {
     expect(health.snapshot('nvidia/best-model', 1_000).consecutiveFailures).toBe(0)
   })
 
+  it('does not switch models later in the same step after a delegated failure', async () => {
+    const agent = {}
+    const health = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate('nvidia', 'first', 'S'), candidate('openrouter', 'fallback', 'A')],
+      health,
+      now: () => 1_000,
+    })
+    await runtime.onRequest(request(agent), async () => original)
+    await runtime.onRequestError({
+      ...request(agent), provider: 'nvidia', failure: { code: 'UNSUPPORTED_OPTION', message: 'unsupported' },
+    }, async () => ({ kind: 'retry' }))
+
+    await expect(runtime.onRequest(request(agent), async () => original)).resolves.toEqual(original)
+  })
+
   it('returns the original config without eligible candidates', async () => {
     const runtime = createRouterRuntime({
       getConfig: () => parseConfig({ providers: { nvidia: { enabled: false } } }),
@@ -115,6 +132,33 @@ describe('RouterRuntime', () => {
     }, downstream)).resolves.toBeUndefined()
   })
 
+  it('does not exceed the step attempt cap when cooling moves the ranking window', async () => {
+    const agent = {}
+    const candidates = Array.from({ length: 5 }, (_, index) => candidate('nvidia', `model-${index}`, 'A'))
+    const health = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({ routing: { maxAttemptsPerStep: 2 } }),
+      getCandidates: () => candidates,
+      health,
+      now: () => 1_000,
+    })
+    const selected: string[] = []
+    const downstream = async () => undefined
+
+    for (let index = 0; index < 3; index += 1) {
+      const call = await runtime.onRequest(request(agent), async () => original)
+      if (call.provider === original.provider && call.model === original.model) break
+      selected.push(call.model)
+      const action = await runtime.onRequestError({
+        ...request(agent), provider: call.provider, failure: { code: 'SERVER', message: 'bad' },
+      }, downstream)
+      if (action === undefined) break
+    }
+
+    expect(selected).toHaveLength(2)
+    expect(selected).toEqual(['model-0', 'model-1'])
+  })
+
   it('refreshes the catalog when a selected model is unknown', async () => {
     const agent = {}
     let refreshed: CandidateModel | undefined
@@ -131,5 +175,58 @@ describe('RouterRuntime', () => {
     }, async () => undefined)
 
     expect(refreshed).toMatchObject({ provider: 'nvidia', model: 'best-model' })
+  })
+
+  it('allows the host to remove an unknown model before refreshing the catalog', async () => {
+    const agent = {}
+    let candidates = [candidate('nvidia', 'gone', 'S'), candidate('openrouter', 'fallback', 'A')]
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => candidates,
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      now: () => 1_000,
+      onUnknownModel: (selected) => {
+        candidates = candidates.filter((item) => candidateKey(item) !== candidateKey(selected))
+      },
+    })
+    await runtime.onRequest(request(agent), async () => original)
+    await runtime.onRequestError({
+      ...request(agent), provider: 'nvidia', failure: { code: 'UNKNOWN_MODEL', message: 'gone' },
+    }, async () => undefined)
+
+    expect(candidates.map(candidateKey)).toEqual(['openrouter/fallback'])
+  })
+
+  it('emits bounded selection and failover telemetry without request contents', async () => {
+    const agent = {}
+    const selected: unknown[] = []
+    const failovers: unknown[] = []
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({ routing: { maxAttemptsPerStep: 2 } }),
+      getCandidates: () => [candidate('nvidia', 'first', 'S'), candidate('nvidia', 'second', 'A')],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      now: () => 1_000,
+      onSelected: (event) => { selected.push(event) },
+      onFailover: (event) => { failovers.push(event) },
+    })
+
+    await runtime.onRequest({ ...request(agent), signal }, async () => original)
+    await runtime.onRequestError({
+      ...request(agent), provider: 'nvidia', failure: { code: 'RATE_LIMIT', message: 'private details' },
+    }, async () => undefined)
+    await runtime.onRequest({ ...request(agent), signal }, async () => original)
+
+    expect(selected).toHaveLength(2)
+    expect(failovers).toMatchObject([{
+      turn: 1, step: 1, attempt: 1, failureCode: 'RATE_LIMIT',
+      isolatedScope: 'model', attempts: 1, nextCandidate: { model: 'second' },
+    }])
+    expect(selected).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        reason: 'policy',
+        metrics: expect.objectContaining({ status: 'unknown', successRate: 0 }),
+      }),
+    ]))
+    expect(JSON.stringify(failovers)).not.toContain('private details')
   })
 })

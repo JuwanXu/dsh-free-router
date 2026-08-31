@@ -29,6 +29,10 @@ function tierRank(tier: string): number {
   return tierOrder[tier as ModelTier] ?? tierOrder['?']
 }
 
+function latencyRank(value: number): number {
+  return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY
+}
+
 export function rankCandidates(
   candidates: readonly CandidateModel[],
   healthByCandidate: ReadonlyMap<string, HealthSnapshot>,
@@ -44,8 +48,9 @@ export function rankCandidates(
     const tier = tierRank(left.tier) - tierRank(right.tier)
     if (tier !== 0) return tier
 
-    const latency = leftHealth.averageFirstByteMs - rightHealth.averageFirstByteMs
-    if (latency !== 0) return latency
+    const leftLatency = latencyRank(leftHealth.averageFirstByteMs)
+    const rightLatency = latencyRank(rightHealth.averageFirstByteMs)
+    if (leftLatency !== rightLatency) return leftLatency < rightLatency ? -1 : 1
 
     const successRate = rightHealth.successRate - leftHealth.successRate
     if (successRate !== 0) return successRate

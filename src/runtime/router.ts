@@ -4,7 +4,7 @@ import { parseConfig, type RouterConfig } from '../config.js'
 import { eligible } from '../eligibility.js'
 import { HealthBook, type HealthOutcome } from '../health.js'
 import { rankCandidates } from '../ranking.js'
-import { candidateKey, type CandidateModel } from '../types.js'
+import { candidateKey, type CandidateModel, type HealthSnapshot } from '../types.js'
 import { AttemptState } from './attempt-state.js'
 
 interface RequestPayload {
@@ -26,6 +26,28 @@ interface Selection {
   candidate: CandidateModel
 }
 
+export interface RouterSelectionEvent {
+  agent: object
+  turn: number
+  step: number
+  attempt: number
+  candidate: CandidateModel
+  reason: 'policy'
+  metrics: HealthSnapshot
+}
+
+export interface RouterFailoverEvent {
+  agent: object
+  turn: number
+  step: number
+  attempt: number
+  failedCandidate: CandidateModel
+  failureCode: string
+  isolatedScope: 'model' | 'provider'
+  nextCandidate: CandidateModel
+  attempts: number
+}
+
 export interface RouterRuntimeDependencies {
   getConfig: () => RouterConfig
   getCandidates: () => readonly CandidateModel[]
@@ -35,6 +57,8 @@ export interface RouterRuntimeDependencies {
   probe?: (candidate: CandidateModel, signal: AbortSignal) => Promise<HealthOutcome>
   onUnknownModel?: (candidate: CandidateModel) => void
   onHealthChange?: () => void
+  onSelected?: (event: RouterSelectionEvent) => void
+  onFailover?: (event: RouterFailoverEvent) => void
 }
 
 const recoverableFailureCodes = new Set([
@@ -50,6 +74,8 @@ const recoverableFailureCodes = new Set([
   'QUOTA',
 ])
 
+const providerFailureCodes = new Set(['AUTH', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'QUOTA'])
+
 function failureCode(failure: LlmFailure): string {
   return typeof failure.code === 'string' ? failure.code : 'UNKNOWN'
 }
@@ -64,6 +90,7 @@ export class RouterRuntime {
   private readonly observedFailures = new Map<string, string[]>()
   private timer: { cancel(): void } | undefined
   private probeRoundRunning = false
+  private probeWakePending = false
 
   constructor(private readonly dependencies: RouterRuntimeDependencies) {
     this.now = dependencies.now ?? Date.now
@@ -71,7 +98,7 @@ export class RouterRuntime {
 
   private rankedCandidates(
     config = this.dependencies.getConfig(),
-    limit = config.routing.maxAttemptsPerStep,
+    limit = Number.POSITIVE_INFINITY,
   ): CandidateModel[] {
     const now = this.now()
     const candidates = this.dependencies.getCandidates().filter((candidate) => {
@@ -92,10 +119,25 @@ export class RouterRuntime {
     const config = this.dependencies.getConfig()
     if (!config.enabled) return original
 
-    const candidate = this.attempts.next(payload.agent, payload.turn, payload.step, this.rankedCandidates(config))
+    const candidate = this.attempts.next(
+      payload.agent,
+      payload.turn,
+      payload.step,
+      this.rankedCandidates(config, Number.POSITIVE_INFINITY),
+      config.routing.maxAttemptsPerStep,
+    )
     if (candidate === undefined) return original
 
     this.selections.set(payload.agent, { turn: payload.turn, step: payload.step, candidate })
+    this.dependencies.onSelected?.({
+      agent: payload.agent,
+      turn: payload.turn,
+      step: payload.step,
+      attempt: this.attempts.count(payload.agent, payload.turn, payload.step),
+      candidate,
+      reason: 'policy',
+      metrics: this.dependencies.health.snapshot(candidateKey(candidate), this.now()),
+    })
     const { reasoningEffort: _reasoningEffort, ...call } = original
     return { ...call, provider: candidate.provider, model: candidate.model }
   }
@@ -109,8 +151,11 @@ export class RouterRuntime {
     if (selection === undefined
       || selection.turn !== payload.turn
       || selection.step !== payload.step
-      || selection.candidate.provider !== payload.provider
-      || !recoverableFailureCodes.has(code)) {
+      || selection.candidate.provider !== payload.provider) {
+      return next()
+    }
+    if (!recoverableFailureCodes.has(code)) {
+      this.attempts.stop(payload.agent, payload.turn, payload.step)
       return next()
     }
 
@@ -119,8 +164,35 @@ export class RouterRuntime {
     }
     if (code === 'UNKNOWN_MODEL') this.dependencies.onUnknownModel?.(selection.candidate)
     const config = this.dependencies.getConfig()
-    if (!config.enabled || !this.attempts.hasRemaining(payload.agent, payload.turn, payload.step, this.rankedCandidates(config))) {
+    const ranked = this.rankedCandidates(config, Number.POSITIVE_INFINITY)
+    if (!config.enabled || !this.attempts.hasRemaining(
+      payload.agent,
+      payload.turn,
+      payload.step,
+      ranked,
+      config.routing.maxAttemptsPerStep,
+    )) {
       return next()
+    }
+    const nextCandidate = this.attempts.peek(
+      payload.agent,
+      payload.turn,
+      payload.step,
+      ranked,
+      config.routing.maxAttemptsPerStep,
+    )
+    if (nextCandidate !== undefined) {
+      this.dependencies.onFailover?.({
+        agent: payload.agent,
+        turn: payload.turn,
+        step: payload.step,
+        attempt: this.attempts.count(payload.agent, payload.turn, payload.step),
+        failedCandidate: selection.candidate,
+        failureCode: code,
+        isolatedScope: providerFailureCodes.has(code) ? 'provider' : 'model',
+        nextCandidate,
+        attempts: this.attempts.count(payload.agent, payload.turn, payload.step),
+      })
     }
     return { kind: 'retry' }
   }
@@ -167,7 +239,16 @@ export class RouterRuntime {
 
   start(): void {
     if (this.dependencies.probe === undefined || this.timer !== undefined || this.probeAbort.signal.aborted) return
-    this.track(this.runProbes())
+    this.wake()
+  }
+
+  /** Cancel an idle timer and immediately probe using the latest catalog. */
+  wake(): void {
+    if (this.dependencies.probe === undefined || this.probeAbort.signal.aborted) return
+    this.timer?.cancel()
+    this.timer = undefined
+    if (this.probeRoundRunning) this.probeWakePending = true
+    else this.track(this.runProbes())
     this.scheduleNextProbe()
   }
 
@@ -212,13 +293,17 @@ export class RouterRuntime {
       await Promise.all(Array.from({ length: concurrency }, () => worker()))
     } finally {
       this.probeRoundRunning = false
+      if (this.probeWakePending && !this.probeAbort.signal.aborted) {
+        this.probeWakePending = false
+        this.track(this.runProbes())
+      }
     }
   }
 
   private scheduleNextProbe(): void {
     if (this.probeAbort.signal.aborted) return
     const config = this.dependencies.getConfig()
-    const hasCandidates = this.rankedCandidates(config, Number.POSITIVE_INFINITY).length > 0
+    const hasCandidates = this.hasEligibleCandidates(config)
     const delayMs = hasCandidates ? config.health.activeProbeIntervalMs : config.health.idleProbeIntervalMs
     this.timer = (this.dependencies.schedule ?? defaultSchedule)(() => {
       this.timer = undefined
@@ -226,6 +311,13 @@ export class RouterRuntime {
       this.track(round)
       void round.then(() => this.scheduleNextProbe(), () => this.scheduleNextProbe())
     }, delayMs)
+  }
+
+  private hasEligibleCandidates(config: RouterConfig): boolean {
+    return this.dependencies.getCandidates().some((candidate) => {
+      const provider = Object.values(config.providers).find((entry) => entry.route === candidate.provider)
+      return provider?.enabled === true && eligible(candidate, config.routing)
+    })
   }
 
   private async probeCandidate(

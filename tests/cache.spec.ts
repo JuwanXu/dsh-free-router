@@ -40,14 +40,52 @@ describe('FileRouterCache', () => {
     await expect(readFile(path, 'utf8')).resolves.not.toMatch(/sk-or-test-secret|Bearer secret/)
   })
 
-  it('ignores expired and malformed files', async () => {
+  it('round-trips an unknown latency through JSON null', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await cache.save({
+      ...record,
+      health: {
+        'openrouter/free:free': {
+          status: 'unknown', averageFirstByteMs: Number.POSITIVE_INFINITY,
+          successRate: 0, consecutiveFailures: 0, coolingUntil: 0,
+        },
+      },
+    })
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({
+      health: { 'openrouter/free:free': { averageFirstByteMs: Number.POSITIVE_INFINITY } },
+    })
+  })
+
+  it('serializes concurrent atomic writes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+
+    await Promise.all([
+      cache.save(record),
+      cache.save({ ...record, updatedAt: 1_001 }),
+    ])
+
+    await expect(cache.load(1_001)).resolves.toMatchObject({ updatedAt: 1_001 })
+  })
+
+  it('returns expired records as stale cold-start references and ignores malformed files', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
     const path = join(directory, 'router.json')
     const cache = new FileRouterCache(path, 10)
     await cache.save(record)
 
-    await expect(cache.load(1_011)).resolves.toBeUndefined()
+    await expect(cache.load(1_011)).resolves.toMatchObject({ ...record, stale: true })
     await writeFile(path, '{bad json')
+    await expect(cache.load(1_001)).resolves.toBeUndefined()
+
+    await writeFile(path, JSON.stringify({
+      ...record,
+      candidates: [null],
+    }))
     await expect(cache.load(1_001)).resolves.toBeUndefined()
   })
 })

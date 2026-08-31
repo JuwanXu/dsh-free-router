@@ -8,6 +8,7 @@
 - 只选择免费、确认支持 tool calling、并满足上下文和 Tier 约束的模型。
 - 每次主 Agent 请求按“可用性 → Tier → 首分片平均延迟 → 成功率”排序。
 - 遇到 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`、鉴权或配额等可恢复故障时，切换同一步尚未尝试过的候选。
+- 每个 `turn/step` 默认最多尝试 4 个模型，并在 Session 中追加非 surface 的 `free-router/selected` 与 `free-router/failover` 事件。
 - 不路由 session title、compaction 和其他辅助调用；它们也不参与健康指标。
 - 不保存 API key、Authorization header 或原始请求。缓存只允许模型目录与健康摘要。
 
@@ -66,7 +67,7 @@ free-router:
 
 同一个 `turn/step` 不会重复尝试同一模型，默认最多尝试 4 个模型。`UNSUPPORTED_OPTION`、上下文溢出和无效请求会交回 DSH 下游处理，避免无意义地切换模型。连续故障采用指数冷却；鉴权、凭据与配额问题会隔离整个 Provider。
 
-缓存记录保存在 `$DSH_HOME/cache/free-router.json`，使用白名单投影，仅含版本、时间、模型公开元数据与健康数值。凭据始终由 DSH 的 `llm-pi-ai`/credentials 能力管理。
+缓存记录保存在 `$DSH_HOME/cache/free-router.json`，使用白名单投影，仅含版本、时间、模型公开元数据与健康数值。过期缓存只用于冷启动排序提示，不会把模型标记为实时可用；凭据始终由 DSH 的 `llm-pi-ai`/credentials 能力管理。
 
 ## 开发与验证
 

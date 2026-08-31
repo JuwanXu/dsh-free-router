@@ -34,7 +34,7 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:unit": "vitest run tests/eligibility.spec.ts tests/ranking.spec.ts tests/health.spec.ts tests/attempt-state.spec.ts tests/openrouter-catalog.spec.ts tests/catalog-registry.spec.ts tests/cache.spec.ts tests/config.spec.ts tests/router.spec.ts tests/observation.spec.ts tests/lifecycle.spec.ts",
+    "test:unit": "vitest run tests/eligibility.spec.ts tests/ranking.spec.ts tests/health.spec.ts tests/attempt-state.spec.ts tests/openrouter-catalog.spec.ts tests/catalog-registry.spec.ts tests/cache.spec.ts tests/config.spec.ts tests/router.spec.ts tests/observation.spec.ts tests/lifecycle.spec.ts tests/events.spec.ts",
     "test:integration": "vitest run tests/dsh-integration.spec.ts",
     "test:smoke": "vitest run tests/package.spec.ts tests/install-smoke.spec.ts",
     "test:watch": "vitest",

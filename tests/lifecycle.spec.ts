@@ -55,4 +55,56 @@ describe('RouterRuntime lifecycle', () => {
     await runtime.dispose()
     expect(maximumActive).toBe(2)
   })
+
+  it('wakes an idle monitor when a catalog becomes available', async () => {
+    let candidates: CandidateModel[] = []
+    const delays: number[] = []
+    let cancelled = false
+    let probes = 0
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({ health: { activeProbeIntervalMs: 60_000, idleProbeIntervalMs: 600_000 } }),
+      getCandidates: () => candidates,
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      schedule: (_callback, delayMs) => {
+        delays.push(delayMs)
+        return { cancel: () => { cancelled = true } }
+      },
+      probe: async () => {
+        probes += 1
+        return { kind: 'success', firstByteMs: 1 }
+      },
+    })
+
+    runtime.start()
+    candidates = [candidate]
+    runtime.wake()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    await runtime.dispose()
+
+    expect(cancelled).toBe(true)
+    expect(probes).toBe(1)
+    expect(delays).toContain(60_000)
+  })
+
+  it('keeps the active cadence while eligible candidates are cooling down', async () => {
+    const health = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    health.record('nvidia/model', { kind: 'failure', code: 'SERVER' }, 0)
+    const delays: number[] = []
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({ health: { activeProbeIntervalMs: 60_000, idleProbeIntervalMs: 600_000 } }),
+      getCandidates: () => [candidate],
+      health,
+      now: () => 50,
+      schedule: (_callback, delayMs) => {
+        delays.push(delayMs)
+        return { cancel: () => {} }
+      },
+      probe: async () => ({ kind: 'success', firstByteMs: 1 }),
+    })
+
+    runtime.start()
+    await runtime.dispose()
+
+    expect(delays).toContain(60_000)
+  })
 })

@@ -36,4 +36,12 @@ describe('OpenRouterCatalogSource', () => {
 
     await expect(source.load(new AbortController().signal)).rejects.toThrow('OpenRouter model directory')
   })
+
+  it('aborts a slow directory request after the configured timeout', async () => {
+    const source = new OpenRouterCatalogSource(async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('timed out', 'TimeoutError')), { once: true })
+    }), undefined, undefined, 1)
+
+    await expect(source.load(new AbortController().signal)).rejects.toMatchObject({ name: 'TimeoutError' })
+  })
 })

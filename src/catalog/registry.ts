@@ -6,14 +6,17 @@ export interface CatalogSource {
 }
 
 export class CatalogRegistry {
-  constructor(private readonly sources: readonly CatalogSource[]) {}
+  constructor(
+    private readonly sources: readonly CatalogSource[],
+    private readonly sourceTimeoutMs = 10_000,
+  ) {}
 
   async refresh(
     executable: ReadonlyMap<string, ReadonlySet<string>>,
     signal: AbortSignal,
     previous: readonly CandidateModel[] = [],
   ): Promise<CandidateModel[]> {
-    const results = await Promise.allSettled(this.sources.map((source) => source.load(signal)))
+    const results = await Promise.allSettled(this.sources.map((source) => this.loadSource(source, signal)))
     const failedProviders = new Set(results.flatMap((result, index) => (
       result.status === 'rejected' && this.sources[index]?.provider !== undefined
         ? [this.sources[index].provider]
@@ -29,5 +32,29 @@ export class CatalogRegistry {
       seen.add(key)
       return true
     })
+  }
+
+  private async loadSource(source: CatalogSource, signal: AbortSignal): Promise<readonly CandidateModel[]> {
+    const timeoutController = new AbortController()
+    const sourceSignal = AbortSignal.any([signal, timeoutController.signal])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let onAbort: (() => void) | undefined
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        timeoutController.abort(new DOMException('catalog source timed out', 'TimeoutError'))
+        reject(new Error(`catalog source ${source.provider ?? 'unknown'} timed out after ${this.sourceTimeoutMs}ms`))
+      }, this.sourceTimeoutMs)
+    })
+    const aborted = new Promise<never>((_, reject) => {
+      onAbort = () => reject(signal.reason ?? new DOMException('catalog refresh aborted', 'AbortError'))
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      return await Promise.race([source.load(sourceSignal), timeout, aborted])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      if (onAbort !== undefined) signal.removeEventListener('abort', onAbort)
+    }
   }
 }

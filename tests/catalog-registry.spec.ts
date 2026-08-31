@@ -32,4 +32,23 @@ describe('CatalogRegistry', () => {
       candidate('nvidia', 'a'), candidate('openrouter', 'cached:free'),
     ])
   })
+
+  it('isolates a catalog source that does not settle before its timeout', async () => {
+    const registry = new CatalogRegistry([
+      {
+        provider: 'openrouter',
+        load: async (signal) => new Promise<readonly ReturnType<typeof candidate>[]>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(new Error('timed out')), { once: true })
+        }),
+      },
+      { provider: 'nvidia', load: async () => [candidate('nvidia', 'a')] },
+    ], 1)
+
+    await expect(registry.refresh(new Map([
+      ['nvidia', new Set(['a'])],
+      ['openrouter', new Set(['cached:free'])],
+    ]), new AbortController().signal, [candidate('openrouter', 'cached:free')])).resolves.toEqual([
+      candidate('nvidia', 'a'), candidate('openrouter', 'cached:free'),
+    ])
+  })
 })
