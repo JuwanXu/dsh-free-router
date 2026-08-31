@@ -3,6 +3,7 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { CatalogRegistry } from './catalog/registry.js'
 import { NvidiaCatalogSource } from './catalog/nvidia.js'
 import { OpenRouterCatalogSource } from './catalog/openrouter.js'
@@ -13,8 +14,9 @@ import {
   type RouterConfig,
 } from './config.js'
 import { HealthBook } from './health.js'
+import { FileRouterCache } from './persistence/cache.js'
 import { createRouterRuntime } from './runtime/router.js'
-import type { CandidateModel } from './types.js'
+import { candidateKey, type CandidateModel } from './types.js'
 
 export const name = 'free-router'
 export const inject = ['llm']
@@ -53,18 +55,39 @@ function routeCatalogCandidates(candidates: readonly CandidateModel[], config: R
   return candidates.map((candidate) => ({ ...candidate, provider: routes[candidate.provider] ?? candidate.provider }))
 }
 
+function sourceCatalogCandidates(candidates: readonly CandidateModel[], config: RouterConfig): CandidateModel[] {
+  const sources: Record<string, string> = {
+    [config.providers.openrouter.route]: 'openrouter',
+    [config.providers.nvidia.route]: 'nvidia',
+  }
+  return candidates.map((candidate) => ({ ...candidate, provider: sources[candidate.provider] ?? candidate.provider }))
+}
+
 /** Register request-level free-model routing on top of existing DSH LLM adapters. */
 export function apply(ctx: Context, entry: RouterConfig): void {
   let current: () => RouterConfig = () => parseConfig(entry)
   let candidates: CandidateModel[] = []
   let refreshGeneration = 0
+  let initialRefreshCompleted = false
   const refreshAbort = new AbortController()
   const logger = ctx.logger('free-router')
   const health = new HealthBook({ baseCooldownMs: 5_000, maxCooldownMs: 10 * 60_000, sampleSize: 20 })
+  const cache = new FileRouterCache(dshHomePath('cache', 'free-router.json'), 24 * 60 * 60_000)
+  const persistCache = (): void => {
+    void cache.save({
+      version: 1,
+      updatedAt: Date.now(),
+      candidates,
+      health: health.snapshots(candidates.map(candidateKey), Date.now()),
+    }).catch((error) => logger.warn(`free-router: cache save failed: ${String(error)}`))
+  }
+  let triggerRefresh: () => void = () => {}
   const runtime = createRouterRuntime({
     getConfig: () => current(),
     getCandidates: () => candidates,
     health,
+    onHealthChange: persistCache,
+    onUnknownModel: () => triggerRefresh(),
     probe: async (candidate, lifecycleSignal) => {
       const startedAt = Date.now()
       const signal = AbortSignal.any([lifecycleSignal, AbortSignal.timeout(current().health.timeoutMs)])
@@ -95,19 +118,22 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     const config = current()
     try {
       const executable = await executableModels(ctx, config)
-      const discovered = await catalog.refresh(executable, refreshAbort.signal)
+      const discovered = await catalog.refresh(executable, refreshAbort.signal, sourceCatalogCandidates(candidates, config))
       if (generation === refreshGeneration && !refreshAbort.signal.aborted) {
         candidates = routeCatalogCandidates(discovered, config)
+        initialRefreshCompleted = true
+        persistCache()
       }
     } catch (error) {
       if (!refreshAbort.signal.aborted) logger.warn(`free-router: model catalog refresh failed; keeping last known candidates: ${String(error)}`)
     }
   }
+  triggerRefresh = () => { void refresh() }
 
   ctx.on('agent/request', (payload, next) => runtime.onRequest(payload, next), true)
   ctx.on('agent/request-error', (payload, next) => runtime.onRequestError(payload, next), true)
   ctx.on('llm/stream', (options, next) => runtime.observeStream(options, next))
-  ctx.on('llm/adapters-updated', () => { void refresh() })
+  ctx.on('llm/adapters-updated', triggerRefresh)
   ctx.effect(() => () => refreshAbort.abort(), 'free-router: catalog refresh cancellation')
   ctx.effect(() => {
     runtime.start()
@@ -120,6 +146,13 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       },
       onChange: () => { void refresh() },
     })
+  })
+  void cache.load(Date.now()).then((record) => {
+    if (record === undefined) return
+    health.restore(record.health)
+    if (initialRefreshCompleted) return
+    const known = new Set(candidates.map(candidateKey))
+    candidates = [...candidates, ...record.candidates.filter((candidate) => !known.has(candidateKey(candidate)))]
   })
   void refresh()
 }

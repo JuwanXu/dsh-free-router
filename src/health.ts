@@ -114,4 +114,23 @@ export class HealthBook {
       coolingUntil,
     }
   }
+
+  restore(snapshots: Readonly<Record<string, HealthSnapshot>>): void {
+    for (const [key, snapshot] of Object.entries(snapshots)) {
+      if (!Number.isFinite(snapshot.averageFirstByteMs)
+        || !Number.isFinite(snapshot.successRate)
+        || !Number.isInteger(snapshot.consecutiveFailures)
+        || !Number.isFinite(snapshot.coolingUntil)) continue
+      const success = snapshot.status === 'available'
+      this.candidates.set(key, {
+        samples: [{ success, ...(success ? { firstByteMs: snapshot.averageFirstByteMs } : {}) }],
+        consecutiveFailures: Math.max(0, snapshot.consecutiveFailures),
+        coolingUntil: Math.max(0, snapshot.coolingUntil),
+      })
+    }
+  }
+
+  snapshots(candidateKeys: readonly string[], now: number): Record<string, HealthSnapshot> {
+    return Object.fromEntries(candidateKeys.map((key) => [key, this.snapshot(key, now)]))
+  }
 }

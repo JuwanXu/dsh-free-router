@@ -66,7 +66,7 @@ free-router:
 
 同一个 `turn/step` 不会重复尝试同一模型，默认最多尝试 4 个模型。`UNSUPPORTED_OPTION`、上下文溢出和无效请求会交回 DSH 下游处理，避免无意义地切换模型。连续故障采用指数冷却；鉴权、凭据与配额问题会隔离整个 Provider。
 
-缓存记录使用白名单投影，仅含版本、时间、模型公开元数据与健康数值。凭据始终由 DSH 的 `llm-pi-ai`/credentials 能力管理。
+缓存记录保存在 `$DSH_HOME/cache/free-router.json`，使用白名单投影，仅含版本、时间、模型公开元数据与健康数值。凭据始终由 DSH 的 `llm-pi-ai`/credentials 能力管理。
 
 ## 开发与验证
 

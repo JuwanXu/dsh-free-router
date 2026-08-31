@@ -114,4 +114,22 @@ describe('RouterRuntime', () => {
       retryPolicy: undefined,
     }, downstream)).resolves.toBeUndefined()
   })
+
+  it('refreshes the catalog when a selected model is unknown', async () => {
+    const agent = {}
+    let refreshed: CandidateModel | undefined
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate('nvidia', 'best-model', 'S'), candidate('openrouter', 'fallback', 'A')],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      now: () => 1_000,
+      onUnknownModel: (selected) => { refreshed = selected },
+    })
+    await runtime.onRequest(request(agent), async () => original)
+    await runtime.onRequestError({
+      ...request(agent), provider: 'nvidia', failure: { code: 'UNKNOWN_MODEL', message: 'gone' }, retryPolicy: undefined,
+    }, async () => undefined)
+
+    expect(refreshed).toMatchObject({ provider: 'nvidia', model: 'best-model' })
+  })
 })

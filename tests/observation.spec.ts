@@ -56,4 +56,25 @@ describe('RouterRuntime stream observation', () => {
     await collect(runtime.observeStream({ ...options(), purpose: 'session-title' }, () => failed()))
     expect(health.snapshot('openrouter/model:free', 1_000).consecutiveFailures).toBe(1)
   })
+
+  it('does not count the same streamed failure again in request-error recovery', async () => {
+    const agent = {}
+    const health = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}), getCandidates: () => [candidate], health, now: () => 1_000,
+    })
+    await runtime.onRequest({ agent, turn: 1, step: 1, signal: new AbortController().signal }, async () => ({
+      provider: 'default', model: 'default',
+    }))
+    async function* failed(): AsyncIterable<StreamChunk> {
+      yield { type: 'finish', reason: { kind: 'error', failure: { code: 'RATE_LIMIT', message: 'slow down' } } }
+    }
+    await collect(runtime.observeStream(options(), () => failed()))
+    await runtime.onRequestError({
+      agent, turn: 1, step: 1, signal: new AbortController().signal,
+      provider: candidate.provider, failure: { code: 'RATE_LIMIT', message: 'slow down' },
+    }, async () => undefined)
+
+    expect(health.snapshot('openrouter/model:free', 1_000).consecutiveFailures).toBe(1)
+  })
 })

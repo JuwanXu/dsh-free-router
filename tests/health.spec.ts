@@ -41,4 +41,18 @@ describe('HealthBook', () => {
     book.record('openrouter/a', { kind: 'success', firstByteMs: 500 }, 700)
     expect(book.snapshot('openrouter/a', 700).averageFirstByteMs).toBe(400)
   })
+
+  it('restores persisted health summaries for a cached candidate', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/a': {
+        status: 'available', averageFirstByteMs: 120, successRate: 1,
+        consecutiveFailures: 0, coolingUntil: 0,
+      },
+    })
+
+    expect(book.snapshot('nvidia/a', 1_000)).toMatchObject({
+      status: 'available', averageFirstByteMs: 120, successRate: 1,
+    })
+  })
 })

@@ -38,6 +38,7 @@ function modelFrom(value: OpenRouterModel, updatedAt: number): CandidateModel | 
 }
 
 export class OpenRouterCatalogSource {
+  readonly provider = 'openrouter'
   constructor(
     private readonly fetchImpl: FetchLike = fetch,
     private readonly endpoint = modelsEndpoint,

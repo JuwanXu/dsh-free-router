@@ -9,6 +9,7 @@ interface NvidiaModel {
 }
 
 export class NvidiaCatalogSource {
+  readonly provider = 'nvidia'
   constructor(private readonly now: () => number = Date.now) {}
 
   async load(_signal: AbortSignal): Promise<CandidateModel[]> {

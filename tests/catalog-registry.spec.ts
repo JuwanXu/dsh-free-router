@@ -15,19 +15,21 @@ describe('CatalogRegistry', () => {
 
     await expect(registry.refresh(new Map([
       ['nvidia', new Set(['a'])],
-      ['openrouter', new Set<string>()],
+      ['openrouter', new Set(['cached:free'])],
     ]), new AbortController().signal)).resolves.toEqual([candidate('nvidia', 'a')])
   })
 
   it('keeps a healthy provider catalog when another provider refresh fails', async () => {
     const registry = new CatalogRegistry([
       { load: async () => [candidate('nvidia', 'a')] },
-      { load: async () => { throw new Error('OpenRouter unavailable') } },
+      { provider: 'openrouter', load: async () => { throw new Error('OpenRouter unavailable') } },
     ])
 
     await expect(registry.refresh(new Map([
       ['nvidia', new Set(['a'])],
-      ['openrouter', new Set<string>()],
-    ]), new AbortController().signal)).resolves.toEqual([candidate('nvidia', 'a')])
+      ['openrouter', new Set(['cached:free'])],
+    ]), new AbortController().signal, [candidate('openrouter', 'cached:free')])).resolves.toEqual([
+      candidate('nvidia', 'a'), candidate('openrouter', 'cached:free'),
+    ])
   })
 })

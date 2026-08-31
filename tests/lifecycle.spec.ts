@@ -31,4 +31,28 @@ describe('RouterRuntime lifecycle', () => {
     expect(probeSignal?.aborted).toBe(true)
     expect(cancelled).toBe(true)
   })
+
+  it('honors the configured global probe concurrency', async () => {
+    let active = 0
+    let maximumActive = 0
+    const candidates = Array.from({ length: 5 }, (_, index) => ({ ...candidate, model: `model-${index}` }))
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({ routing: { maxAttemptsPerStep: 5 }, health: { concurrency: 2, maxCandidatesPerProvider: 5 } }),
+      getCandidates: () => candidates,
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      schedule: () => ({ cancel: () => {} }),
+      probe: async () => {
+        active += 1
+        maximumActive = Math.max(maximumActive, active)
+        await new Promise((resolve) => setTimeout(resolve, 5))
+        active -= 1
+        return { kind: 'success', firstByteMs: 1 }
+      },
+    })
+
+    runtime.start()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    await runtime.dispose()
+    expect(maximumActive).toBe(2)
+  })
 })

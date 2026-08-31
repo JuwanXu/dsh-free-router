@@ -33,6 +33,8 @@ export interface RouterRuntimeDependencies {
   now?: () => number
   schedule?: (callback: () => void, delayMs: number) => { cancel(): void }
   probe?: (candidate: CandidateModel, signal: AbortSignal) => Promise<HealthOutcome>
+  onUnknownModel?: (candidate: CandidateModel) => void
+  onHealthChange?: () => void
 }
 
 const recoverableFailureCodes = new Set([
@@ -59,13 +61,18 @@ export class RouterRuntime {
   private readonly now: () => number
   private readonly probeAbort = new AbortController()
   private readonly running = new Set<Promise<void>>()
+  private readonly observedFailures = new Map<string, string[]>()
   private timer: { cancel(): void } | undefined
+  private probeRoundRunning = false
 
   constructor(private readonly dependencies: RouterRuntimeDependencies) {
     this.now = dependencies.now ?? Date.now
   }
 
-  private rankedCandidates(config = this.dependencies.getConfig()): CandidateModel[] {
+  private rankedCandidates(
+    config = this.dependencies.getConfig(),
+    limit = config.routing.maxAttemptsPerStep,
+  ): CandidateModel[] {
     const now = this.now()
     const candidates = this.dependencies.getCandidates().filter((candidate) => {
       const provider = Object.values(config.providers).find((entry) => entry.route === candidate.provider)
@@ -77,7 +84,7 @@ export class RouterRuntime {
       candidateKey(candidate),
       this.dependencies.health.snapshot(candidateKey(candidate), now),
     ]))
-    return rankCandidates(candidates, health, now).slice(0, config.routing.maxAttemptsPerStep)
+    return rankCandidates(candidates, health, now).slice(0, limit)
   }
 
   async onRequest(payload: RequestPayload, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig> {
@@ -107,7 +114,10 @@ export class RouterRuntime {
       return next()
     }
 
-    this.dependencies.health.record(candidateKey(selection.candidate), { kind: 'failure', code }, this.now())
+    if (!this.consumeObservedFailure(selection.candidate, code)) {
+      this.recordHealth(selection.candidate, { kind: 'failure', code })
+    }
+    if (code === 'UNKNOWN_MODEL') this.dependencies.onUnknownModel?.(selection.candidate)
     const config = this.dependencies.getConfig()
     if (!config.enabled || !this.attempts.hasRemaining(payload.agent, payload.turn, payload.step, this.rankedCandidates(config))) {
       return next()
@@ -130,37 +140,35 @@ export class RouterRuntime {
   ): AsyncIterable<StreamChunk> {
     const startedAt = this.now()
     let firstChunkAt: number | undefined
-    let finished = false
     try {
       for await (const chunk of next()) {
         if (firstChunkAt === undefined) firstChunkAt = this.now()
         if (chunk.type === 'finish') {
-          finished = true
           if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
-            this.dependencies.health.record(candidateKey(candidate), {
-              kind: 'failure', code: chunk.reason.failure.code,
-            }, this.now())
+            const code = chunk.reason.failure.code
+            this.recordHealth(candidate, {
+              kind: 'failure', code,
+            })
+            this.rememberObservedFailure(candidate, code)
           } else {
-            this.dependencies.health.record(candidateKey(candidate), {
+            this.recordHealth(candidate, {
               kind: 'success', firstByteMs: Math.max(0, (firstChunkAt ?? this.now()) - startedAt),
-            }, this.now())
+            })
           }
         }
         yield chunk
       }
     } catch (error) {
-      this.dependencies.health.record(candidateKey(candidate), { kind: 'failure', code: 'TRANSPORT' }, this.now())
+      this.recordHealth(candidate, { kind: 'failure', code: 'TRANSPORT' })
+      this.rememberObservedFailure(candidate, 'TRANSPORT')
       throw error
-    } finally {
-      if (!finished && this.probeAbort.signal.aborted) return
     }
   }
 
   start(): void {
     if (this.dependencies.probe === undefined || this.timer !== undefined || this.probeAbort.signal.aborted) return
     this.track(this.runProbes())
-    const interval = this.dependencies.getConfig().health.activeProbeIntervalMs
-    this.timer = (this.dependencies.schedule ?? defaultSchedule)(() => this.track(this.runProbes()), interval)
+    this.scheduleNextProbe()
   }
 
   async dispose(): Promise<void> {
@@ -180,31 +188,85 @@ export class RouterRuntime {
 
   private async runProbes(): Promise<void> {
     const probe = this.dependencies.probe
-    if (probe === undefined || this.probeAbort.signal.aborted) return
-    const maximumPerProvider = this.dependencies.getConfig().health.maxCandidatesPerProvider
-    const perProvider = new Map<string, number>()
-    const targets = this.rankedCandidates().filter((candidate) => {
-      const count = perProvider.get(candidate.provider) ?? 0
-      if (count >= maximumPerProvider) return false
-      perProvider.set(candidate.provider, count + 1)
-      return true
-    })
-    await Promise.all(targets.map(async (candidate) => {
-      try {
-        const outcome = await probe(candidate, this.probeAbort.signal)
-        if (!this.probeAbort.signal.aborted) this.dependencies.health.record(candidateKey(candidate), outcome, this.now())
-      } catch {
-        if (!this.probeAbort.signal.aborted) {
-          this.dependencies.health.record(candidateKey(candidate), { kind: 'failure', code: 'TRANSPORT' }, this.now())
+    if (probe === undefined || this.probeAbort.signal.aborted || this.probeRoundRunning) return
+    this.probeRoundRunning = true
+    try {
+      const maximumPerProvider = this.dependencies.getConfig().health.maxCandidatesPerProvider
+      const perProvider = new Map<string, number>()
+      const targets = this.rankedCandidates(undefined, Number.POSITIVE_INFINITY).filter((candidate) => {
+        const count = perProvider.get(candidate.provider) ?? 0
+        if (count >= maximumPerProvider) return false
+        perProvider.set(candidate.provider, count + 1)
+        return true
+      })
+      let next = 0
+      const worker = async (): Promise<void> => {
+        while (!this.probeAbort.signal.aborted) {
+          const candidate = targets[next]
+          next += 1
+          if (candidate === undefined) return
+          await this.probeCandidate(candidate, probe)
         }
       }
-    }))
+      const concurrency = Math.min(this.dependencies.getConfig().health.concurrency, targets.length)
+      await Promise.all(Array.from({ length: concurrency }, () => worker()))
+    } finally {
+      this.probeRoundRunning = false
+    }
+  }
+
+  private scheduleNextProbe(): void {
+    if (this.probeAbort.signal.aborted) return
+    const config = this.dependencies.getConfig()
+    const hasCandidates = this.rankedCandidates(config, Number.POSITIVE_INFINITY).length > 0
+    const delayMs = hasCandidates ? config.health.activeProbeIntervalMs : config.health.idleProbeIntervalMs
+    this.timer = (this.dependencies.schedule ?? defaultSchedule)(() => {
+      this.timer = undefined
+      const round = this.runProbes()
+      this.track(round)
+      void round.then(() => this.scheduleNextProbe(), () => this.scheduleNextProbe())
+    }, delayMs)
+  }
+
+  private async probeCandidate(
+    candidate: CandidateModel,
+    probe: NonNullable<RouterRuntimeDependencies['probe']>,
+  ): Promise<void> {
+    try {
+      const outcome = await probe(candidate, this.probeAbort.signal)
+      if (!this.probeAbort.signal.aborted) this.recordHealth(candidate, outcome)
+    } catch {
+      if (!this.probeAbort.signal.aborted) {
+        this.recordHealth(candidate, { kind: 'failure', code: 'TRANSPORT' })
+      }
+    }
+  }
+
+  private rememberObservedFailure(candidate: CandidateModel, code: string): void {
+    const key = candidateKey(candidate)
+    this.observedFailures.set(key, [...(this.observedFailures.get(key) ?? []), code])
+  }
+
+  private consumeObservedFailure(candidate: CandidateModel, code: string): boolean {
+    const key = candidateKey(candidate)
+    const failures = this.observedFailures.get(key)
+    if (failures === undefined) return false
+    const index = failures.indexOf(code)
+    if (index === -1) return false
+    failures.splice(index, 1)
+    if (failures.length === 0) this.observedFailures.delete(key)
+    return true
+  }
+
+  private recordHealth(candidate: CandidateModel, outcome: HealthOutcome): void {
+    this.dependencies.health.record(candidateKey(candidate), outcome, this.now())
+    this.dependencies.onHealthChange?.()
   }
 }
 
 function defaultSchedule(callback: () => void, delayMs: number): { cancel(): void } {
-  const timer = setInterval(callback, delayMs)
-  return { cancel: () => clearInterval(timer) }
+  const timer = setTimeout(callback, delayMs)
+  return { cancel: () => clearTimeout(timer) }
 }
 
 export function createRouterRuntime(dependencies: RouterRuntimeDependencies): RouterRuntime {

@@ -1,5 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { defaultConfig } from '../src/config.js'
 
@@ -10,10 +12,16 @@ async function waitForCatalog(): Promise<void> {
 }
 
 describe('DSH integration', () => {
-  afterEach(() => vi.unstubAllGlobals())
+  const previousDshHome = process.env.DSH_HOME
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    if (previousDshHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousDshHome
+  })
 
   it('uses DSH request waterfalls to route and fail over real provider/model headers', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ data: [] }), { status: 200 }))
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}`)
     vi.resetModules()
     const plugin = await import('../src/index.js')
     const ctx = new Context()
