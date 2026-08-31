@@ -25,4 +25,15 @@ export class AttemptState {
     if (selected !== undefined) current.tried.add(candidateKey(selected))
     return selected
   }
+
+  hasRemaining(
+    agent: object,
+    turn: number,
+    step: number,
+    candidates: readonly CandidateModel[],
+  ): boolean {
+    const current = this.attempts.get(agent)
+    if (current === undefined || current.turn !== turn || current.step !== step) return candidates.length > 0
+    return candidates.some((candidate) => !current.tried.has(candidateKey(candidate)))
+  }
 }
