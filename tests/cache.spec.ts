@@ -26,6 +26,20 @@ describe('FileRouterCache', () => {
     await expect(readFile(path, 'utf8')).resolves.not.toContain('Authorization')
   })
 
+  it('drops unexpected properties so credentials cannot reach the cache', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const unsafe = {
+      ...record,
+      candidates: [{ ...record.candidates[0], apiKey: 'sk-or-test-secret' }],
+      health: { 'openrouter/free:free': { ...record.health, authorization: 'Bearer secret' } },
+    }
+
+    await cache.save(unsafe as typeof record)
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/sk-or-test-secret|Bearer secret/)
+  })
+
   it('ignores expired and malformed files', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
     const path = join(directory, 'router.json')

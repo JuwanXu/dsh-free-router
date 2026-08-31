@@ -40,8 +40,23 @@ export class FileRouterCache {
     const safe: RouterCacheRecord = {
       version: 1,
       updatedAt: record.updatedAt,
-      candidates: record.candidates.map((candidate) => ({ ...candidate })),
-      health: Object.fromEntries(Object.entries(record.health).map(([key, snapshot]) => [key, { ...snapshot }])),
+      candidates: record.candidates.map((candidate) => ({
+        provider: candidate.provider,
+        model: candidate.model,
+        displayName: candidate.displayName,
+        contextWindow: candidate.contextWindow,
+        toolCalling: candidate.toolCalling,
+        free: candidate.free,
+        tier: candidate.tier,
+        catalogUpdatedAt: candidate.catalogUpdatedAt,
+      })),
+      health: Object.fromEntries(Object.entries(record.health).map(([key, snapshot]) => [key, {
+        status: snapshot.status,
+        averageFirstByteMs: snapshot.averageFirstByteMs,
+        successRate: snapshot.successRate,
+        consecutiveFailures: snapshot.consecutiveFailures,
+        coolingUntil: snapshot.coolingUntil,
+      }])),
     }
     await mkdir(dirname(this.path), { recursive: true })
     const temporary = `${this.path}.tmp`

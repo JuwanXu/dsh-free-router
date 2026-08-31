@@ -11,7 +11,8 @@ export class CatalogRegistry {
     executable: ReadonlyMap<string, ReadonlySet<string>>,
     signal: AbortSignal,
   ): Promise<CandidateModel[]> {
-    const groups = await Promise.all(this.sources.map((source) => source.load(signal)))
+    const results = await Promise.allSettled(this.sources.map((source) => source.load(signal)))
+    const groups = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
     const seen = new Set<string>()
     return groups.flat().filter((candidate) => {
       if (!executable.get(candidate.provider)?.has(candidate.model)) return false
