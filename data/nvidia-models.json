@@ -1,0 +1,14 @@
+[
+  {
+    "model": "deepseek-ai/deepseek-v3.2",
+    "displayName": "DeepSeek V3.2",
+    "contextWindow": 131072,
+    "tier": "S"
+  },
+  {
+    "model": "qwen/qwen3-coder-480b-a35b-instruct",
+    "displayName": "Qwen3 Coder 480B",
+    "contextWindow": 262144,
+    "tier": "S+"
+  }
+]
