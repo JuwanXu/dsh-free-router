@@ -2,6 +2,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-llm'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { CatalogRegistry } from './catalog/registry.js'
 import { NvidiaCatalogSource } from './catalog/nvidia.js'
 import { OpenRouterCatalogSource } from './catalog/openrouter.js'
@@ -64,6 +65,29 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     getConfig: () => current(),
     getCandidates: () => candidates,
     health,
+    probe: async (candidate, lifecycleSignal) => {
+      const startedAt = Date.now()
+      const signal = AbortSignal.any([lifecycleSignal, AbortSignal.timeout(current().health.timeoutMs)])
+      let firstChunkAt: number | undefined
+      for await (const chunk of ctx.llm.stream({
+        provider: candidate.provider,
+        model: candidate.model,
+        maxTokens: 1,
+        messages: [createUserMessage({
+          content: [{ type: 'text', text: 'Reply with OK.' }],
+          source: { kind: 'plugin', plugin: name },
+        })],
+        signal,
+      })) {
+        firstChunkAt ??= Date.now()
+        if (chunk.type !== 'finish') continue
+        if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
+          return { kind: 'failure', code: chunk.reason.failure.code }
+        }
+        return { kind: 'success', firstByteMs: Math.max(0, (firstChunkAt ?? Date.now()) - startedAt) }
+      }
+      return { kind: 'failure', code: 'EMPTY_RESPONSE' }
+    },
   })
 
   const refresh = async (): Promise<void> => {
@@ -82,8 +106,13 @@ export function apply(ctx: Context, entry: RouterConfig): void {
 
   ctx.on('agent/request', (payload, next) => runtime.onRequest(payload, next), true)
   ctx.on('agent/request-error', (payload, next) => runtime.onRequestError(payload, next), true)
+  ctx.on('llm/stream', (options, next) => runtime.observeStream(options, next))
   ctx.on('llm/adapters-updated', () => { void refresh() })
   ctx.effect(() => () => refreshAbort.abort(), 'free-router: catalog refresh cancellation')
+  ctx.effect(() => {
+    runtime.start()
+    return () => runtime.dispose()
+  }, 'free-router: health monitoring lifecycle')
   ctx.inject(['settings'], (settingsCtx) => {
     settingsCtx.settings.installSection(ctx, FREE_ROUTER_SETTINGS_NAMESPACE, ConfigSchema, current(), {
       setSource: (source) => {
