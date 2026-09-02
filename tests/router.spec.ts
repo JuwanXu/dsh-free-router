@@ -132,6 +132,31 @@ describe('RouterRuntime', () => {
     }, downstream)).resolves.toBeUndefined()
   })
 
+  it('reports the stable code and attempted models when no fallback remains', async () => {
+    const agent = {}
+    const exhausted: unknown[] = []
+    const dependencies = {
+      getConfig: () => parseConfig({ routing: { maxAttemptsPerStep: 1 } }),
+      getCandidates: () => [candidate('nvidia', 'only', 'S')],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      now: () => 1_000,
+      onExhausted: (event: unknown) => exhausted.push(event),
+    } as Parameters<typeof createRouterRuntime>[0] & {
+      onExhausted: (event: unknown) => void
+    }
+    const runtime = createRouterRuntime(dependencies)
+
+    await runtime.onRequest(request(agent), async () => original)
+    await runtime.onRequestError({
+      ...request(agent), provider: 'nvidia', failure: { code: 'SERVER', message: 'private failure body' },
+    }, async () => undefined)
+
+    expect(exhausted).toEqual([expect.objectContaining({
+      failureCode: 'SERVER', attemptedCandidates: ['nvidia/only'], attempts: 1,
+    })])
+    expect(JSON.stringify(exhausted)).not.toContain('private failure body')
+  })
+
   it('does not exceed the step attempt cap when cooling moves the ranking window', async () => {
     const agent = {}
     const candidates = Array.from({ length: 5 }, (_, index) => candidate('nvidia', `model-${index}`, 'A'))

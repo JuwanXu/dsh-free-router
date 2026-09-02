@@ -15,13 +15,21 @@ export class CatalogRegistry {
     executable: ReadonlyMap<string, ReadonlySet<string>>,
     signal: AbortSignal,
     previous: readonly CandidateModel[] = [],
+    onSourceFailure?: (provider: string) => void,
   ): Promise<CandidateModel[]> {
-    const results = await Promise.allSettled(this.sources.map((source) => this.loadSource(source, signal)))
+    const results = await Promise.allSettled(this.sources.map((source) => (
+      source.provider !== undefined && executable.get(source.provider)?.size === 0
+        ? Promise.resolve([])
+        : this.loadSource(source, signal)
+    )))
     const failedProviders = new Set(results.flatMap((result, index) => (
       result.status === 'rejected' && this.sources[index]?.provider !== undefined
         ? [this.sources[index].provider]
         : []
     )))
+    if (!signal.aborted) {
+      for (const provider of failedProviders) onSourceFailure?.(provider)
+    }
     const groups = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
     const retained = previous.filter((candidate) => failedProviders.has(candidate.provider))
     const seen = new Set<string>()

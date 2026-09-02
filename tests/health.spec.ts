@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { HealthBook } from '../src/health.js'
+import type { HealthSnapshot } from '../src/types.js'
 
 describe('HealthBook', () => {
   it('cools a model after a transient failure and resets it after success', () => {
@@ -93,5 +94,100 @@ describe('HealthBook', () => {
     }, { stale: true })
 
     expect(book.snapshot('nvidia/a', 1_000)).toMatchObject({ status: 'unknown', averageFirstByteMs: 120, successRate: 1 })
+  })
+
+  it('clears only configuration-failure isolation when a provider changes', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.record('nvidia/auth', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_000)
+    book.record('nvidia/server', { kind: 'failure', code: 'SERVER' }, 1_000)
+
+    book.clearProvider('nvidia')
+
+    expect(book.snapshot('nvidia/auth', 1_000).status).toBe('unknown')
+    expect(book.snapshot('nvidia/server', 1_000).status).toBe('unavailable')
+  })
+
+  it('preserves restored model cooldown and ranking metrics when a provider changes', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/server': {
+        status: 'unavailable', averageFirstByteMs: 240, successRate: 0.75,
+        consecutiveFailures: 2, coolingUntil: 2_000, lastFailureCode: 'SERVER',
+      },
+    })
+
+    book.clearProvider('nvidia')
+
+    expect(book.snapshot('nvidia/server', 1_500)).toMatchObject({
+      status: 'unavailable',
+      averageFirstByteMs: 240,
+      successRate: 0.75,
+      consecutiveFailures: 2,
+      coolingUntil: 2_000,
+    })
+  })
+
+  it('clears restored configuration isolation without discarding ranking metrics', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/auth': {
+        status: 'unavailable', averageFirstByteMs: 320, successRate: 0.5,
+        consecutiveFailures: 1, coolingUntil: 2_000, lastFailureCode: 'INVALID_CREDENTIAL',
+      },
+    })
+
+    book.clearProvider('nvidia')
+
+    expect(book.snapshot('nvidia/auth', 1_500)).toMatchObject({
+      status: 'unknown',
+      averageFirstByteMs: 320,
+      successRate: 0.5,
+      consecutiveFailures: 0,
+      coolingUntil: 0,
+    })
+  })
+
+  it('does not carry stale failure counts into the next live cooldown', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    book.restore({
+      'nvidia/a': {
+        status: 'unavailable', averageFirstByteMs: 500, successRate: 0.5,
+        consecutiveFailures: 8, coolingUntil: 99_000,
+      },
+    }, { stale: true })
+
+    book.record('nvidia/a', { kind: 'failure', code: 'SERVER' }, 1_000)
+
+    expect(book.snapshot('nvidia/a', 1_000)).toMatchObject({
+      consecutiveFailures: 1,
+      coolingUntil: 1_100,
+    })
+  })
+
+  it('ignores malformed scoped recovery data without throwing', () => {
+    const book = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    const malformed = {
+      status: 'unknown', averageFirstByteMs: 120, successRate: 1,
+      consecutiveFailures: 0, coolingUntil: 0,
+      recovery: { model: null, provider: null },
+    } as unknown as HealthSnapshot
+
+    expect(() => book.restore({ 'nvidia/a': malformed })).not.toThrow()
+    expect(book.snapshot('nvidia/a', 1_000).status).toBe('unknown')
+  })
+
+  it('continues model cooldown from the scoped model failure count after restore', () => {
+    const source = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    source.record('nvidia/a', { kind: 'failure', code: 'SERVER' }, 1_000)
+    source.record('nvidia/a', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_000)
+    const restored = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    restored.restore({ 'nvidia/a': source.snapshot('nvidia/a', 1_000) })
+
+    restored.record('nvidia/a', { kind: 'failure', code: 'SERVER' }, 1_300)
+
+    expect(restored.snapshot('nvidia/a', 1_300)).toMatchObject({
+      consecutiveFailures: 2,
+      coolingUntil: 1_500,
+    })
   })
 })

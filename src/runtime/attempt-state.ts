@@ -80,4 +80,10 @@ export class AttemptState {
     if (current === undefined || current.turn !== turn || current.step !== step) return 0
     return current.count
   }
+
+  tried(agent: object, turn: number, step: number): string[] {
+    const current = this.attempts.get(agent)
+    if (current === undefined || current.turn !== turn || current.step !== step) return []
+    return [...current.tried]
+  }
 }

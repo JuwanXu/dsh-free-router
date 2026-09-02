@@ -3,6 +3,14 @@
   "version": "0.1.0",
   "description": "Request-level free model routing for DeepSeek Harness",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JuwanXu/dsh-free-router.git"
+  },
+  "bugs": {
+    "url": "https://github.com/JuwanXu/dsh-free-router/issues"
+  },
+  "homepage": "https://github.com/JuwanXu/dsh-free-router#readme",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -35,7 +43,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:unit": "vitest run tests/eligibility.spec.ts tests/ranking.spec.ts tests/health.spec.ts tests/attempt-state.spec.ts tests/openrouter-catalog.spec.ts tests/catalog-registry.spec.ts tests/cache.spec.ts tests/config.spec.ts tests/router.spec.ts tests/observation.spec.ts tests/lifecycle.spec.ts tests/events.spec.ts",
-    "test:integration": "vitest run tests/dsh-integration.spec.ts",
+    "test:integration": "vitest run tests/dsh-integration.spec.ts tests/agent-loop-integration.spec.ts",
     "test:smoke": "vitest run tests/package.spec.ts tests/install-smoke.spec.ts",
     "test:watch": "vitest",
     "check": "pnpm run typecheck && pnpm run test && pnpm run build"
@@ -45,8 +53,8 @@
     "@deepseek-ai/dsh-agent": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-llm": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-llm-pi-ai": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-session": "^0.1.2-alpha.2"
+    "@deepseek-ai/dsh-session": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2"
   },
   "dependencies": {
     "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.2",
@@ -55,11 +63,15 @@
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.2",
     "@deepseek-ai/dsh-agent": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-agent-loop": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-llm": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-llm-pi-ai": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-home-paths": "^0.1.2-alpha.2",
-    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2",
     "@deepseek-ai/dsh-session": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-session-projection": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-settings": "^0.1.2-alpha.2",
+    "@deepseek-ai/dsh-system-prompt": "0.1.2-alpha.2",
+    "@deepseek-ai/dsh-tools": "0.1.2-alpha.2",
     "@types/node": "^22.15.0",
     "tsdown": "^0.22.2",
     "typescript": "^5.8.3",

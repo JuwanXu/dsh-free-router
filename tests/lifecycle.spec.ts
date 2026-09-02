@@ -1,3 +1,4 @@
+import { markAgentLoopRequest, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import { parseConfig } from '../src/config.js'
 import { HealthBook } from '../src/health.js'
@@ -8,6 +9,12 @@ const candidate: CandidateModel = {
   provider: 'nvidia', model: 'model', displayName: 'Model', contextWindow: 65_536,
   toolCalling: true, free: true, tier: 'A', catalogUpdatedAt: 0,
 }
+
+const options = (): GenerateOptions => markAgentLoopRequest({
+  provider: candidate.provider,
+  model: candidate.model,
+  messages: [],
+})
 
 describe('RouterRuntime lifecycle', () => {
   it('aborts active probes and cancels future scheduling on disposal', async () => {
@@ -106,5 +113,144 @@ describe('RouterRuntime lifecycle', () => {
     await runtime.dispose()
 
     expect(delays).toContain(60_000)
+  })
+
+  it('closes active observed streams during disposal', async () => {
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    let resolveNext!: (result: IteratorResult<StreamChunk>) => void
+    let returned = false
+    const source: AsyncIterable<StreamChunk> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          entered()
+          return new Promise<IteratorResult<StreamChunk>>((resolve) => { resolveNext = resolve })
+        },
+        return: async () => {
+          returned = true
+          resolveNext({ done: true, value: undefined })
+          return { done: true, value: undefined }
+        },
+      }),
+    }
+    const health = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 })
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate],
+      health,
+    })
+    const iterator = runtime.observeStream(options(), () => source)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await started
+
+    await runtime.dispose()
+
+    expect(returned).toBe(true)
+    await expect(pending).resolves.toMatchObject({ done: true })
+    expect(health.snapshot('nvidia/model', Date.now()).status).toBe('unknown')
+  })
+
+  it('closes the source stream when its consumer stops early', async () => {
+    let returned = false
+    const source: AsyncIterable<StreamChunk> = {
+      [Symbol.asyncIterator]: () => ({
+        next: async () => ({ done: false, value: { type: 'text-delta', index: 0, text: 'partial' } }),
+        return: async () => {
+          returned = true
+          return { done: true, value: undefined }
+        },
+      }),
+    }
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+    })
+    const iterator = runtime.observeStream(options(), () => source)[Symbol.asyncIterator]()
+
+    await iterator.next()
+    await iterator.return?.()
+
+    expect(returned).toBe(true)
+    await runtime.dispose()
+  })
+
+  it('does not let an uncooperative source stream block disposal forever', async () => {
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      entered()
+      await new Promise<void>(() => {})
+      yield { type: 'text-delta', index: 0, text: 'never' }
+    }
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      disposeTimeoutMs: 5,
+    })
+    const iterator = runtime.observeStream(options(), source)[Symbol.asyncIterator]()
+    void iterator.next()
+    await started
+
+    const outcome = await Promise.race([
+      runtime.dispose().then(() => 'disposed'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 25)),
+    ])
+
+    expect(outcome).toBe('disposed')
+  })
+
+  it('settles the observed stream wrapper when disposal interrupts an uncooperative source', async () => {
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const source = async function* (): AsyncIterable<StreamChunk> {
+      entered()
+      await new Promise<void>(() => {})
+      yield { type: 'text-delta', index: 0, text: 'never' }
+    }
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      disposeTimeoutMs: 5,
+    })
+    const iterator = runtime.observeStream(options(), source)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await started
+
+    await runtime.dispose()
+    const outcome = await Promise.race([
+      pending.then(() => 'settled'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 25)),
+    ])
+
+    expect(outcome).toBe('settled')
+  })
+
+  it('contains a synchronous source return failure during disposal', async () => {
+    let entered!: () => void
+    const started = new Promise<void>((resolve) => { entered = resolve })
+    const source: AsyncIterable<StreamChunk> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => {
+          entered()
+          return new Promise<IteratorResult<StreamChunk>>(() => {})
+        },
+        return: () => { throw new Error('return failed') },
+      }),
+    }
+    const runtime = createRouterRuntime({
+      getConfig: () => parseConfig({}),
+      getCandidates: () => [candidate],
+      health: new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 3 }),
+      disposeTimeoutMs: 5,
+    })
+    const iterator = runtime.observeStream(options(), () => source)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await started
+
+    await expect(runtime.dispose()).resolves.toBeUndefined()
+    await expect(pending).resolves.toMatchObject({ done: true })
   })
 })

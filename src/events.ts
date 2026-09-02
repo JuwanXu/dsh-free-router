@@ -1,7 +1,24 @@
 import type { HealthSnapshot } from './types.js'
 
-export interface FreeRouterMetrics extends Omit<HealthSnapshot, 'averageFirstByteMs'> {
+export interface FreeRouterMetrics extends Omit<
+  HealthSnapshot,
+  'averageFirstByteMs'
+  | 'lastFailureCode'
+  | 'recovery'
+> {
   averageFirstByteMs: number | null
+}
+
+export function toFreeRouterMetrics(metrics: HealthSnapshot): FreeRouterMetrics {
+  const {
+    lastFailureCode: _lastFailureCode,
+    recovery: _recovery,
+    ...publicMetrics
+  } = metrics
+  return {
+    ...publicMetrics,
+    averageFirstByteMs: Number.isFinite(metrics.averageFirstByteMs) ? metrics.averageFirstByteMs : null,
+  }
 }
 
 /** Durable, non-surface telemetry emitted for routing decisions. */

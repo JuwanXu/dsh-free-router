@@ -2,6 +2,7 @@ import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
+import { HealthBook } from '../src/health.js'
 import { FileRouterCache } from '../src/persistence/cache.js'
 
 const record = {
@@ -59,6 +60,109 @@ describe('FileRouterCache', () => {
     })
   })
 
+  it('round-trips the last failure code used to distinguish isolation scope', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await cache.save({
+      ...record,
+      health: {
+        'openrouter/free:free': {
+          status: 'unavailable', averageFirstByteMs: 100,
+          successRate: 0.5, consecutiveFailures: 1, coolingUntil: 2_000,
+          lastFailureCode: 'SERVER',
+        },
+      },
+    })
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({
+      health: { 'openrouter/free:free': { lastFailureCode: 'SERVER' } },
+    })
+  })
+
+  it('keeps model cooldown separate from provider isolation across a cache round-trip', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const source = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    source.record('nvidia/a', { kind: 'failure', code: 'SERVER' }, 1_100)
+    source.record('nvidia/b', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_000)
+    source.record('nvidia/b', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_100)
+    await cache.save({
+      ...record,
+      health: source.snapshots(['nvidia/a', 'nvidia/b'], 1_100),
+    })
+    const loaded = await cache.load(1_100)
+    expect(loaded).toBeDefined()
+    expect(loaded!.health['nvidia/a']?.recovery).toEqual({
+      model: {
+        status: 'unavailable', successRate: 0, consecutiveFailures: 1,
+        coolingUntil: 1_200, lastFailureCode: 'SERVER',
+      },
+      provider: { coolingUntil: 1_300, failureCode: 'INVALID_CREDENTIAL' },
+    })
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/modelCoolingUntil|providerCoolingUntil/)
+    const restored = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    restored.restore(loaded!.health)
+
+    restored.clearProvider('nvidia')
+
+    expect(restored.isCooling('nvidia/a', 1_150)).toBe(true)
+    expect(restored.isCooling('nvidia/a', 1_250)).toBe(false)
+    expect(restored.isCooling('nvidia/b', 1_150)).toBe(false)
+  })
+
+  it('preserves one model own cooldown when clearing its restored provider isolation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const source = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    source.record('nvidia/a', { kind: 'failure', code: 'SERVER' }, 1_100)
+    source.record('nvidia/a', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_100)
+    await cache.save({
+      ...record,
+      health: source.snapshots(['nvidia/a'], 1_100),
+    })
+    const loaded = await cache.load(1_100)
+    expect(loaded).toBeDefined()
+    const restored = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    restored.restore(loaded!.health)
+
+    restored.clearProvider('nvidia')
+
+    expect(restored.isCooling('nvidia/a', 1_150)).toBe(true)
+    expect(restored.isCooling('nvidia/a', 1_250)).toBe(false)
+    expect(restored.snapshot('nvidia/a', 1_150)).toMatchObject({
+      status: 'unavailable',
+      consecutiveFailures: 1,
+      lastFailureCode: 'SERVER',
+    })
+  })
+
+  it('restores a healthy model status after sibling provider isolation expires', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const source = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    source.record('nvidia/a', { kind: 'success', firstByteMs: 80 }, 900)
+    source.record('nvidia/b', { kind: 'failure', code: 'INVALID_CREDENTIAL' }, 1_000)
+    await cache.save({
+      ...record,
+      health: source.snapshots(['nvidia/a', 'nvidia/b'], 1_000),
+    })
+    const loaded = await cache.load(1_000)
+    expect(loaded).toBeDefined()
+    const restored = new HealthBook({ baseCooldownMs: 100, maxCooldownMs: 1_000, sampleSize: 5 })
+    restored.restore(loaded!.health)
+
+    expect(restored.snapshot('nvidia/a', 1_050).status).toBe('unavailable')
+    expect(restored.snapshot('nvidia/a', 1_150)).toMatchObject({
+      status: 'available',
+      successRate: 1,
+      averageFirstByteMs: 80,
+    })
+  })
+
   it('serializes concurrent atomic writes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
     const path = join(directory, 'router.json')
@@ -72,13 +176,17 @@ describe('FileRouterCache', () => {
     await expect(cache.load(1_001)).resolves.toMatchObject({ updatedAt: 1_001 })
   })
 
-  it('returns expired records as stale cold-start references and ignores malformed files', async () => {
+  it('returns expired records only as health-ranking references and ignores malformed files', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
     const path = join(directory, 'router.json')
     const cache = new FileRouterCache(path, 10)
     await cache.save(record)
 
-    await expect(cache.load(1_011)).resolves.toMatchObject({ ...record, stale: true })
+    await expect(cache.load(1_011)).resolves.toMatchObject({
+      ...record,
+      candidates: [],
+      stale: true,
+    })
     await writeFile(path, '{bad json')
     await expect(cache.load(1_001)).resolves.toBeUndefined()
 

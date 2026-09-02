@@ -1,20 +1,14 @@
 import z from '@deepseek-ai/schemastery'
-import { providerDescriptors } from './providers.js'
+import { defaultProviderConfigs, providerDescriptors, type ProviderConfig, type ProviderKey } from './providers.js'
 import type { ModelTier } from './types.js'
 
 export const FREE_ROUTER_SETTINGS_NAMESPACE = 'free-router'
 
-export interface ProviderConfig {
-  enabled: boolean
-  route: string
-}
+export type { ProviderConfig } from './providers.js'
 
 export interface RouterConfig {
   enabled: boolean
-  providers: {
-    openrouter: ProviderConfig
-    nvidia: ProviderConfig
-  }
+  providers: Record<ProviderKey, ProviderConfig>
   routing: {
     maxAttemptsPerStep: number
     minimumContextWindow: number
@@ -33,10 +27,7 @@ export interface RouterConfig {
 
 export const defaultConfig: RouterConfig = {
   enabled: true,
-  providers: {
-    openrouter: { enabled: true, route: 'openrouter' },
-    nvidia: { enabled: true, route: 'nvidia' },
-  },
+  providers: defaultProviderConfigs(),
   routing: {
     maxAttemptsPerStep: 4,
     minimumContextWindow: 32_768,
@@ -55,20 +46,15 @@ export const defaultConfig: RouterConfig = {
 
 const tiers: ModelTier[] = ['S+', 'S', 'A+', 'A', 'A-', 'B+', 'B', 'C', '?']
 const providerKeys = new Set(providerDescriptors.map(({ key }) => key))
+const providerSettings = z.object(Object.fromEntries(providerDescriptors.map(({ key, config }) => [key, z.object({
+  enabled: z.boolean().default(config.enabled),
+  route: z.string().min(1).default(config.route),
+}).default(config)]))) as z<RouterConfig['providers']>
 
 /** DSH Settings schema, including defaults so an empty user section is usable. */
 export const Config: z<RouterConfig> = z.object({
   enabled: z.boolean().default(defaultConfig.enabled),
-  providers: z.object({
-    openrouter: z.object({
-      enabled: z.boolean().default(defaultConfig.providers.openrouter.enabled),
-      route: z.string().min(1).default(defaultConfig.providers.openrouter.route),
-    }).default(defaultConfig.providers.openrouter),
-    nvidia: z.object({
-      enabled: z.boolean().default(defaultConfig.providers.nvidia.enabled),
-      route: z.string().min(1).default(defaultConfig.providers.nvidia.route),
-    }).default(defaultConfig.providers.nvidia),
-  }).default(defaultConfig.providers),
+  providers: providerSettings.default(defaultConfig.providers),
   routing: z.object({
     maxAttemptsPerStep: z.number().step(1).min(1).max(32).default(defaultConfig.routing.maxAttemptsPerStep),
     minimumContextWindow: z.number().step(1).min(1).default(defaultConfig.routing.minimumContextWindow),
@@ -118,10 +104,10 @@ export function parseConfig(value: unknown): RouterConfig {
   const providersInput = mergeRecord(defaultConfig.providers, value.providers, 'providers')
   const unknownProviders = Object.keys(providersInput).filter((key) => !providerKeys.has(key as typeof providerDescriptors[number]['key']))
   if (unknownProviders.length > 0) throw new TypeError(`unknown providers: ${unknownProviders.join(', ')}`)
-  const readProvider = (name: 'openrouter' | 'nvidia'): ProviderConfig => {
-    const input = mergeRecord(defaultConfig.providers[name], providersInput[name], `providers.${name}`)
+  const readProvider = (key: ProviderKey): ProviderConfig => {
+    const input = mergeRecord(defaultConfig.providers[key], providersInput[key], `providers.${key}`)
     if (typeof input.enabled !== 'boolean' || typeof input.route !== 'string' || input.route.length === 0) {
-      throw new TypeError(`providers.${name} must contain enabled and route`)
+      throw new TypeError(`providers.${key} must contain enabled and route`)
     }
     return { enabled: input.enabled, route: input.route }
   }
@@ -133,7 +119,7 @@ export function parseConfig(value: unknown): RouterConfig {
 
   return {
     enabled: value.enabled ?? defaultConfig.enabled,
-    providers: { openrouter: readProvider('openrouter'), nvidia: readProvider('nvidia') },
+    providers: Object.fromEntries(providerDescriptors.map(({ key }) => [key, readProvider(key)])) as RouterConfig['providers'],
     routing: {
       maxAttemptsPerStep: validateNumber(routingInput.maxAttemptsPerStep, 'routing.maxAttemptsPerStep', 1, 32),
       minimumContextWindow: validateNumber(routingInput.minimumContextWindow, 'routing.minimumContextWindow', 1),

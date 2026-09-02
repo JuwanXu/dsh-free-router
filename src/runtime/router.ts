@@ -2,7 +2,7 @@ import type { RequestErrorAction } from '@deepseek-ai/dsh-agent'
 import { isAgentLoopRequest, type GenerateOptions, type LlmCallConfig, type LlmFailure, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { parseConfig, type RouterConfig } from '../config.js'
 import { eligible } from '../eligibility.js'
-import { HealthBook, type HealthOutcome } from '../health.js'
+import { HealthBook, isProviderFailure, type HealthOutcome } from '../health.js'
 import { rankCandidates } from '../ranking.js'
 import { candidateKey, type CandidateModel, type HealthSnapshot } from '../types.js'
 import { AttemptState } from './attempt-state.js'
@@ -24,6 +24,10 @@ interface Selection {
   turn: number
   step: number
   candidate: CandidateModel
+}
+
+interface ActiveStream {
+  close(): Promise<void>
 }
 
 export interface RouterSelectionEvent {
@@ -48,6 +52,14 @@ export interface RouterFailoverEvent {
   attempts: number
 }
 
+export interface RouterExhaustedEvent {
+  turn: number
+  step: number
+  attempts: number
+  failureCode: string
+  attemptedCandidates: string[]
+}
+
 export interface RouterRuntimeDependencies {
   getConfig: () => RouterConfig
   getCandidates: () => readonly CandidateModel[]
@@ -59,6 +71,8 @@ export interface RouterRuntimeDependencies {
   onHealthChange?: () => void
   onSelected?: (event: RouterSelectionEvent) => void
   onFailover?: (event: RouterFailoverEvent) => void
+  onExhausted?: (event: RouterExhaustedEvent) => void
+  disposeTimeoutMs?: number
 }
 
 const recoverableFailureCodes = new Set([
@@ -74,8 +88,6 @@ const recoverableFailureCodes = new Set([
   'QUOTA',
 ])
 
-const providerFailureCodes = new Set(['AUTH', 'MISSING_CREDENTIAL', 'INVALID_CREDENTIAL', 'QUOTA'])
-
 function failureCode(failure: LlmFailure): string {
   return typeof failure.code === 'string' ? failure.code : 'UNKNOWN'
 }
@@ -85,8 +97,10 @@ export class RouterRuntime {
   private readonly attempts = new AttemptState()
   private readonly selections = new WeakMap<object, Selection>()
   private readonly now: () => number
+  private readonly disposeTimeoutMs: number
   private readonly probeAbort = new AbortController()
   private readonly running = new Set<Promise<void>>()
+  private readonly activeStreams = new Set<ActiveStream>()
   private readonly observedFailures = new Map<string, string[]>()
   private timer: { cancel(): void } | undefined
   private probeRoundRunning = false
@@ -94,6 +108,7 @@ export class RouterRuntime {
 
   constructor(private readonly dependencies: RouterRuntimeDependencies) {
     this.now = dependencies.now ?? Date.now
+    this.disposeTimeoutMs = dependencies.disposeTimeoutMs ?? dependencies.getConfig().health.timeoutMs
   }
 
   private rankedCandidates(
@@ -116,6 +131,7 @@ export class RouterRuntime {
 
   async onRequest(payload: RequestPayload, next: () => Promise<LlmCallConfig>): Promise<LlmCallConfig> {
     const original = await next()
+    if (this.probeAbort.signal.aborted) return original
     const config = this.dependencies.getConfig()
     if (!config.enabled) return original
 
@@ -146,6 +162,7 @@ export class RouterRuntime {
     payload: RequestErrorPayload,
     next: () => Promise<RequestErrorAction>,
   ): Promise<RequestErrorAction> {
+    if (this.probeAbort.signal.aborted) return next()
     const selection = this.selections.get(payload.agent)
     const code = failureCode(payload.failure)
     if (selection === undefined
@@ -172,6 +189,13 @@ export class RouterRuntime {
       ranked,
       config.routing.maxAttemptsPerStep,
     )) {
+      this.dependencies.onExhausted?.({
+        turn: payload.turn,
+        step: payload.step,
+        attempts: this.attempts.count(payload.agent, payload.turn, payload.step),
+        failureCode: code,
+        attemptedCandidates: this.attempts.tried(payload.agent, payload.turn, payload.step),
+      })
       return next()
     }
     const nextCandidate = this.attempts.peek(
@@ -189,7 +213,7 @@ export class RouterRuntime {
         attempt: this.attempts.count(payload.agent, payload.turn, payload.step),
         failedCandidate: selection.candidate,
         failureCode: code,
-        isolatedScope: providerFailureCodes.has(code) ? 'provider' : 'model',
+        isolatedScope: isProviderFailure(code) ? 'provider' : 'model',
         nextCandidate,
         attempts: this.attempts.count(payload.agent, payload.turn, payload.step),
       })
@@ -212,8 +236,18 @@ export class RouterRuntime {
   ): AsyncIterable<StreamChunk> {
     const startedAt = this.now()
     let firstChunkAt: number | undefined
+    let completed = false
+    const iterator = next()[Symbol.asyncIterator]()
+    const activeStream = createActiveStream(iterator)
+    this.activeStreams.add(activeStream)
     try {
-      for await (const chunk of next()) {
+      while (true) {
+        const result = await nextUntilAbort(iterator.next(), this.probeAbort.signal)
+        if (result.done) {
+          completed = true
+          return
+        }
+        const chunk = result.value
         if (firstChunkAt === undefined) firstChunkAt = this.now()
         if (chunk.type === 'finish') {
           if (chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted') {
@@ -231,9 +265,13 @@ export class RouterRuntime {
         yield chunk
       }
     } catch (error) {
+      if (this.probeAbort.signal.aborted) return
       this.recordHealth(candidate, { kind: 'failure', code: 'TRANSPORT' })
       this.rememberObservedFailure(candidate, 'TRANSPORT')
       throw error
+    } finally {
+      this.activeStreams.delete(activeStream)
+      if (!completed) void activeStream.close()
     }
   }
 
@@ -256,7 +294,10 @@ export class RouterRuntime {
     this.probeAbort.abort()
     this.timer?.cancel()
     this.timer = undefined
-    await Promise.allSettled([...this.running])
+    await settleWithin([
+      ...[...this.activeStreams].map((stream) => stream.close()),
+      ...this.running,
+    ], this.disposeTimeoutMs)
   }
 
   private track(promise: Promise<void>): void {
@@ -351,9 +392,56 @@ export class RouterRuntime {
   }
 
   private recordHealth(candidate: CandidateModel, outcome: HealthOutcome): void {
+    if (this.probeAbort.signal.aborted) return
     this.dependencies.health.record(candidateKey(candidate), outcome, this.now())
     this.dependencies.onHealthChange?.()
   }
+}
+
+function createActiveStream(iterator: AsyncIterator<StreamChunk>): ActiveStream {
+  let closing: Promise<void> | undefined
+  return {
+    close: () => {
+      if (closing !== undefined) return closing
+      try {
+        closing = Promise.resolve(iterator.return?.()).then(() => undefined, () => undefined)
+      } catch {
+        closing = Promise.resolve()
+      }
+      return closing
+    },
+  }
+}
+
+function nextUntilAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const finish = (callback: () => void): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', onAbort)
+      callback()
+    }
+    const onAbort = (): void => finish(() => reject(
+      signal.reason ?? new DOMException('运行时已释放', 'AbortError'),
+    ))
+    if (signal.aborted) onAbort()
+    else signal.addEventListener('abort', onAbort, { once: true })
+    void operation.then(
+      (value) => finish(() => resolve(value)),
+      (error) => finish(() => reject(error)),
+    )
+  })
+}
+
+async function settleWithin(tasks: readonly Promise<unknown>[], timeoutMs: number): Promise<void> {
+  if (tasks.length === 0) return
+  let timer: ReturnType<typeof setTimeout> | undefined
+  await Promise.race([
+    Promise.allSettled(tasks),
+    new Promise<void>((resolve) => { timer = setTimeout(resolve, timeoutMs) }),
+  ])
+  if (timer !== undefined) clearTimeout(timer)
 }
 
 function defaultSchedule(callback: () => void, delayMs: number): { cancel(): void } {

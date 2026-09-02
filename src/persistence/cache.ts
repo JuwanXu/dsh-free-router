@@ -1,13 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
-import type { CandidateModel, HealthSnapshot } from '../types.js'
+import type { CandidateModel, HealthRecoverySnapshot, HealthSnapshot } from '../types.js'
 
 export interface RouterCacheRecord {
   version: 1
   updatedAt: number
   candidates: CandidateModel[]
   health: Record<string, HealthSnapshot>
-  /** In-memory marker: the record is usable only as a cold-start hint. */
+  /** 仅存在于内存中的标记：该记录只能作为冷启动排序参考。 */
   stale?: true
 }
 
@@ -39,6 +39,30 @@ function isHealthSnapshot(value: unknown): value is HealthSnapshot {
     && value.successRate >= 0 && value.successRate <= 1
     && typeof consecutiveFailures === 'number' && Number.isInteger(consecutiveFailures) && consecutiveFailures >= 0
     && typeof value.coolingUntil === 'number' && Number.isFinite(value.coolingUntil) && value.coolingUntil >= 0
+    && (value.lastFailureCode === undefined
+      || (typeof value.lastFailureCode === 'string' && value.lastFailureCode.length > 0))
+    && (value.recovery === undefined || isHealthRecoverySnapshot(value.recovery))
+}
+
+function isHealthRecoverySnapshot(value: unknown): value is HealthRecoverySnapshot {
+  if (!isRecord(value) || !isRecord(value.model) || !isRecord(value.provider)) return false
+  const model = value.model
+  const provider = value.provider
+  return (model.status === 'available' || model.status === 'unavailable' || model.status === 'unknown')
+    && typeof model.successRate === 'number' && Number.isFinite(model.successRate)
+    && model.successRate >= 0 && model.successRate <= 1
+    && typeof model.consecutiveFailures === 'number'
+    && Number.isInteger(model.consecutiveFailures) && model.consecutiveFailures >= 0
+    && validCoolingUntil(model.coolingUntil)
+    && (model.lastFailureCode === undefined
+      || (typeof model.lastFailureCode === 'string' && model.lastFailureCode.length > 0))
+    && validCoolingUntil(provider.coolingUntil)
+    && (provider.failureCode === undefined
+      || (typeof provider.failureCode === 'string' && provider.failureCode.length > 0))
+}
+
+function validCoolingUntil(value: unknown): boolean {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
 function isCacheRecord(value: unknown): value is RouterCacheRecord {
@@ -55,10 +79,35 @@ function isCacheRecord(value: unknown): value is RouterCacheRecord {
 
 function normalizeHealthSnapshot(snapshot: HealthSnapshot): HealthSnapshot {
   return {
-    ...snapshot,
+    status: snapshot.status,
     averageFirstByteMs: snapshot.averageFirstByteMs === null
       ? Number.POSITIVE_INFINITY
       : snapshot.averageFirstByteMs,
+    successRate: snapshot.successRate,
+    consecutiveFailures: snapshot.consecutiveFailures,
+    coolingUntil: snapshot.coolingUntil,
+    ...(snapshot.lastFailureCode === undefined ? {} : { lastFailureCode: snapshot.lastFailureCode }),
+    ...(snapshot.recovery === undefined ? {} : { recovery: copyRecoverySnapshot(snapshot.recovery) }),
+  }
+}
+
+function copyRecoverySnapshot(recovery: HealthRecoverySnapshot): HealthRecoverySnapshot {
+  return {
+    model: {
+      status: recovery.model.status,
+      successRate: recovery.model.successRate,
+      consecutiveFailures: recovery.model.consecutiveFailures,
+      coolingUntil: recovery.model.coolingUntil,
+      ...(recovery.model.lastFailureCode === undefined
+        ? {}
+        : { lastFailureCode: recovery.model.lastFailureCode }),
+    },
+    provider: {
+      coolingUntil: recovery.provider.coolingUntil,
+      ...(recovery.provider.failureCode === undefined
+        ? {}
+        : { failureCode: recovery.provider.failureCode }),
+    },
   }
 }
 
@@ -83,7 +132,9 @@ export class FileRouterCache {
           normalizeHealthSnapshot(snapshot),
         ])),
       }
-      return now - record.updatedAt > this.ttlMs ? { ...record, stale: true } : record
+      return now - record.updatedAt > this.ttlMs
+        ? { ...record, candidates: [], stale: true }
+        : record
     } catch {
       return undefined
     }
@@ -115,6 +166,8 @@ export class FileRouterCache {
         successRate: snapshot.successRate,
         consecutiveFailures: snapshot.consecutiveFailures,
         coolingUntil: snapshot.coolingUntil,
+        ...(snapshot.lastFailureCode === undefined ? {} : { lastFailureCode: snapshot.lastFailureCode }),
+        ...(snapshot.recovery === undefined ? {} : { recovery: copyRecoverySnapshot(snapshot.recovery) }),
       }])),
     }
     await mkdir(dirname(this.path), { recursive: true })

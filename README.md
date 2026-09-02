@@ -16,7 +16,13 @@
 
 前置条件：Node.js 22.19+、pnpm 11+，以及包含 `llm`、`agent`、`settings` 与 `@deepseek-ai/dsh-llm-pi-ai` 的完整 DSH profile。
 
-在本仓库根目录构建后，使用 DSH 的本地插件安装命令：
+从 npm 安装插件：
+
+```bash
+dsh plugin --profile web add dsh-free-router
+```
+
+如需从源码开发，在本仓库根目录构建后使用本地插件安装命令：
 
 ```bash
 pnpm install
