@@ -1,28 +1,30 @@
 # DSH Free Router
 
-为 [DeepSeek Harness](https://github.com/deepseek-ai/DeepSeek-Harness) 提供免费模型的请求级自动路由与故障切换。它复用官方 `@deepseek-ai/dsh-llm-pi-ai` 进行实际调用，不注册虚拟 Provider，因此会话记录、usage 和错误始终保留真实的 `provider/model`。
+[Chinese documentation](./docs/README.zh-CN.md)
 
-## 能力范围
+A DeepSeek Harness plugin for request-level routing and failover across free models. It reuses the official `@deepseek-ai/dsh-llm-pi-ai` adapter for actual requests and never registers a virtual provider, so session history, usage, and errors always retain the real `provider/model`.
 
-- 首版目录：NVIDIA NIM 静态验证清单与 OpenRouter 实时免费模型目录。
-- 只选择免费、确认支持 tool calling、并满足上下文和 Tier 约束的模型。
-- 每次主 Agent 请求按“可用性 → Tier → 首分片平均延迟 → 成功率”排序。
-- 遇到 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`、鉴权或配额等可恢复故障时，切换同一步尚未尝试过的候选。
-- 每个 `turn/step` 默认最多尝试 4 个模型，并在 Session 中追加非 surface 的 `free-router/selected` 与 `free-router/failover` 事件。
-- 不路由 session title、compaction 和其他辅助调用；它们也不参与健康指标。
-- 不保存 API key、Authorization header 或原始请求。缓存只允许模型目录与健康摘要。
+## Scope
 
-## 安装
+- Initial catalog sources: a statically verified NVIDIA NIM list and the live OpenRouter free-model catalog.
+- Selects only free models that are confirmed to support tool calling and satisfy the context-window and tier constraints.
+- Ranks each primary-agent request by availability, tier, average first-token latency, then success rate.
+- On recoverable `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`, authentication, or quota failures, switches to an untried candidate in the same step.
+- Attempts at most four models per `turn/step` by default and appends non-surface `free-router/selected` and `free-router/failover` events to the session.
+- Does not route session titles, compaction, or other auxiliary calls; those calls do not affect health metrics.
+- Never stores API keys, Authorization headers, or raw requests. The cache is limited to model catalog data and health summaries.
 
-前置条件：Node.js 22.19+、pnpm 11+，以及包含 `llm`、`agent`、`settings` 与 `@deepseek-ai/dsh-llm-pi-ai` 的完整 DSH profile。
+## Installation
 
-从 npm 安装插件：
+Prerequisites: Node.js 22.19+, pnpm 11+, and a full DSH profile that includes `llm`, `agent`, `settings`, and `@deepseek-ai/dsh-llm-pi-ai`.
+
+Install from npm:
 
 ```bash
 dsh plugin --profile web add dsh-free-router
 ```
 
-如需从源码开发，在本仓库根目录构建后使用本地插件安装命令：
+For local development, build the repository root and install it as a local plugin:
 
 ```bash
 pnpm install
@@ -30,7 +32,7 @@ pnpm run build
 dsh plugin --profile web add "file:$(pwd)"
 ```
 
-然后在 DSH Models/Settings 中启用 `llm-pi-ai` 的 NVIDIA NIM 和/或 OpenRouter route，并通过环境变量或 DSH credentials 配置对应凭据。建议将两者的 adapter 内重试关掉，让本插件优先跨模型切换：
+Then enable the NVIDIA NIM and/or OpenRouter routes in DSH `llm-pi-ai`, and provide credentials through environment variables or DSH credentials. Disable adapter-level retries so this plugin can perform cross-model failover first:
 
 ```yaml
 llm-pi-ai:
@@ -43,9 +45,9 @@ llm-pi-ai:
       retryPolicy: { mode: normal, maxRetries: 0 }
 ```
 
-## 配置
+## Configuration
 
-插件在 DSH Settings 中注册 `free-router` 命名空间。下面是完整默认配置：
+The plugin registers the `free-router` namespace in DSH Settings. Its complete default configuration is:
 
 ```yaml
 free-router:
@@ -67,15 +69,15 @@ free-router:
     maxCandidatesPerProvider: 8
 ```
 
-`route` 是 DSH 中 `llm-pi-ai` 实际注册的 Provider 路由名。`includeModels` 非空时是白名单；`excludeModels` 始终优先排除。没有合格候选或插件关闭时，请求保持原始 DSH 模型配置，不会阻塞对话。
+`route` must match the actual provider route registered by DSH `llm-pi-ai`. A non-empty `includeModels` list acts as an allowlist, while `excludeModels` always takes precedence. If the plugin is disabled or no eligible candidate exists, the request keeps the original DSH model configuration and is not blocked.
 
-## 故障处理与隐私
+## Failure Handling and Privacy
 
-同一个 `turn/step` 不会重复尝试同一模型，默认最多尝试 4 个模型。`UNSUPPORTED_OPTION`、上下文溢出和无效请求会交回 DSH 下游处理，避免无意义地切换模型。连续故障采用指数冷却；鉴权、凭据与配额问题会隔离整个 Provider。
+A model is never attempted twice in the same `turn/step`, and there are at most four attempts by default. `UNSUPPORTED_OPTION`, context overflow, and invalid requests are delegated to DSH downstream handling to avoid pointless switching. Consecutive failures use exponential cooldown; authentication, credential, and quota failures isolate the entire provider.
 
-缓存记录保存在 `$DSH_HOME/cache/free-router.json`，使用白名单投影，仅含版本、时间、模型公开元数据与健康数值。过期缓存只用于冷启动排序提示，不会把模型标记为实时可用；凭据始终由 DSH 的 `llm-pi-ai`/credentials 能力管理。
+The cache is stored at `$DSH_HOME/cache/free-router.json` and uses an allowlisted projection that contains only version, timestamps, public model metadata, and health values. An expired cache is used only as a cold-start ranking hint and never marks a model as currently available. Credentials remain exclusively managed by DSH `llm-pi-ai` and credentials services.
 
-## 开发与验证
+## Development and Verification
 
 ```bash
 pnpm run check
@@ -83,8 +85,8 @@ pnpm run test:integration
 pnpm run test:smoke
 ```
 
-不会在测试中调用真实模型或要求 API key。未来将新增配置驱动的任意 OpenAI-compatible Provider 目录源；该扩展不会改变当前的请求路由、排序或健康模型。
+Tests neither call real models nor require API keys. A future extension will add configuration-driven catalog sources for arbitrary OpenAI-compatible providers without changing the existing routing, ranking, or health model.
 
-## 许可与归因
+## License and Attribution
 
-代码采用 [MIT](./LICENSE) 许可。模型 Tier 数据的来源和许可说明见 [data/ATTRIBUTION.md](./data/ATTRIBUTION.md)。
+The code is released under the [MIT](./LICENSE) license. See [data/ATTRIBUTION.md](./data/ATTRIBUTION.md) for model-tier data sources and license notices.

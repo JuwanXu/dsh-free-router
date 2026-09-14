@@ -25,6 +25,7 @@
   "files": [
     "dist",
     "data",
+    "docs/README.zh-CN.md",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
