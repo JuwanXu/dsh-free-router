@@ -12,12 +12,14 @@ export const providerDescriptors = [
   {
     key: 'openrouter',
     source: 'openrouter',
+    dynamicRegistration: true,
     config: { enabled: true, route: 'openrouter' },
     createCatalog: (): CatalogSource => new OpenRouterCatalogSource(),
   },
   {
     key: 'nvidia',
     source: 'nvidia',
+    dynamicRegistration: false,
     config: { enabled: true, route: 'nvidia' },
     createCatalog: (): CatalogSource => new NvidiaCatalogSource(),
   },

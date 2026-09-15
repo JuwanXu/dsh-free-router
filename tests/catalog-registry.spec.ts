@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { CatalogRegistry } from '../src/catalog/registry.js'
+import { providerDescriptors } from '../src/providers.js'
 
 const candidate = (provider: string, model: string) => ({
   provider, model, displayName: model, contextWindow: 65_536,
@@ -7,6 +8,30 @@ const candidate = (provider: string, model: string) => ({
 })
 
 describe('CatalogRegistry', () => {
+  it('discovers an enabled source before an adapter exposes its models', async () => {
+    const registry = new CatalogRegistry([
+      { provider: 'openrouter', load: async () => [candidate('openrouter', 'new:free')] },
+    ])
+
+    const discovered = await registry.discover(new Set(['openrouter']), new AbortController().signal)
+
+    expect(discovered).toEqual([candidate('openrouter', 'new:free')])
+    expect(registry.executable(discovered, new Map([['openrouter', new Set()]]))).toEqual([])
+  })
+
+  it('retains only candidates from a failed source', async () => {
+    const registry = new CatalogRegistry([
+      { provider: 'openrouter', load: async () => { throw new Error('unavailable') } },
+      { provider: 'nvidia', load: async () => [candidate('nvidia', 'fresh')] },
+    ])
+
+    await expect(registry.discover(
+      new Set(['openrouter', 'nvidia']),
+      new AbortController().signal,
+      [candidate('openrouter', 'cached')],
+    )).resolves.toEqual([candidate('nvidia', 'fresh'), candidate('openrouter', 'cached')])
+  })
+
   it('keeps only models exposed by the active DSH provider routes', async () => {
     const registry = new CatalogRegistry([
       { load: async () => [candidate('nvidia', 'a')] },
@@ -105,5 +130,14 @@ describe('CatalogRegistry', () => {
     await refresh
 
     expect(warnings).toEqual([])
+  })
+})
+
+describe('provider catalog descriptors', () => {
+  it('allows dynamic registration only for OpenRouter', () => {
+    expect(Object.fromEntries(providerDescriptors.map(({ source, dynamicRegistration }) => [source, dynamicRegistration]))).toEqual({
+      openrouter: true,
+      nvidia: false,
+    })
   })
 })
