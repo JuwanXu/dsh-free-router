@@ -228,6 +228,20 @@ describe('dynamic free-model registration', () => {
     await started.dispose()
   })
 
+  it('removes cached OpenRouter candidates when the managed target becomes a conflict', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-conflict-after-registration`)
+    const started = await startPlugin()
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+
+    const providers = (started.document['llm-pi-ai'] as { providers: Record<string, unknown> }).providers
+    providers[managedRoute] = { apiKeyEnv: 'OTHER_KEY' }
+    started.ctx.emit('llm/adapters-updated')
+    await settleRefreshes()
+
+    await expect(requestThroughWaterfall(started.ctx)).resolves.toEqual(original)
+    await started.dispose()
+  })
+
   it('does not write again after its own adapter update', async () => {
     process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-loop`)
     const started = await startPlugin()

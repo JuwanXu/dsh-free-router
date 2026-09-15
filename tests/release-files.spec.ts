@@ -15,7 +15,11 @@ describe('release files', () => {
 
   it('ships user documentation but excludes internal planning records', () => {
     const packageFiles = manifest.files as string[]
+    const isInternalPlanningPath = (file: string): boolean => /(?:^|\/)docs\/superpowers\//.test(file)
+
     expect(packageFiles).toContain('docs/README.zh-CN.md')
-    expect(packageFiles.some((file) => file.includes('/docs/superpowers/'))).toBe(false)
+    expect(isInternalPlanningPath('docs/superpowers/plan.md')).toBe(true)
+    expect(isInternalPlanningPath('/docs/superpowers/plan.md')).toBe(true)
+    expect(packageFiles.some(isInternalPlanningPath)).toBe(false)
   })
 })

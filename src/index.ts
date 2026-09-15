@@ -359,7 +359,10 @@ export function apply(ctx: Context, entry: RouterConfig): void {
         )
         const reconciliation = reconcileManagedRoute(profiles, planned, cachedManagedClaim)
         if (reconciliation.kind === 'conflict') {
-          warn(`registration:openrouter:${reconciliation.reason}`, '托管 OpenRouter 路由已由其他配置占用；继续保留上次验证通过的候选')
+          candidates = candidates.filter((candidate) => candidate.provider !== registration.route)
+          persistCache()
+          runtime.wake()
+          warn(`registration:openrouter:${reconciliation.reason}`, '托管 OpenRouter 路由已由其他配置占用；已移除该路由的候选')
           return
         }
         if (reconciliation.kind === 'create' || reconciliation.kind === 'update') {
