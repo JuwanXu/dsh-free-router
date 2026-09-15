@@ -153,6 +153,42 @@ describe('DSH integration', () => {
     await fiber.dispose()
   })
 
+  it('keeps the original adapter route when registration is enabled but Settings is unavailable', async () => {
+    vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ data: [{
+      id: 'first:free', name: 'First Free', context_length: 65_536,
+      pricing: { prompt: '0', completion: '0' }, supported_parameters: ['tools'],
+    }] }), { status: 200 }))
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-without-settings`)
+    vi.resetModules()
+    const plugin = await import('../src/index.js')
+    const config = structuredClone(defaultConfig)
+    config.providers.nvidia.enabled = false
+    config.registration.openrouter.enabled = true
+    config.routing.minimumTier = '?'
+    const ctx = new Context()
+    ctx.provide('llm', {
+      listProviders: () => [{ id: 'openrouter' }],
+      listModels: async () => [{ provider: 'openrouter', id: 'first:free', name: 'First Free' }],
+      stream: async function* () {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      },
+    } as never)
+    const fiber = ctx.plugin(plugin, config)
+    await fiber
+    await waitForCatalog()
+
+    const waterfall = ctx.events.waterfall.bind(ctx.events) as (
+      thisArg: object,
+      event: string,
+      payload: object,
+      next: () => Promise<unknown>,
+    ) => Promise<unknown>
+    await expect(waterfall(ctx, 'agent/request', {
+      agent: {}, turn: 1, step: 1, signal: new AbortController().signal,
+    }, async () => original)).resolves.toMatchObject({ provider: 'openrouter', model: 'first:free' })
+    await fiber.dispose()
+  })
+
   it('clears provider isolation after an adapter update even when topology is unchanged', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ data: [] }), { status: 200 }))
     process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-isolation`)
