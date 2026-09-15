@@ -71,6 +71,44 @@ free-router:
 
 `route` must match the actual provider route registered by DSH `llm-pi-ai`. A non-empty `includeModels` list acts as an allowlist, while `excludeModels` always takes precedence. If the plugin is disabled or no eligible candidate exists, the request keeps the original DSH model configuration and is not blocked.
 
+### Dynamic OpenRouter registration
+
+Set up an OpenRouter source route and enable the managed route below to keep the eligible free, tool-capable models in the DSH model picker:
+
+```yaml
+llm-pi-ai:
+  providers:
+    openrouter:
+      apiKeyEnv: OPENROUTER_API_KEY
+      baseURL: https://openrouter.ai/api/v1
+      retryPolicy: { mode: normal, maxRetries: 0 }
+
+free-router:
+  enabled: true
+  providers:
+    openrouter: { enabled: true, route: openrouter }
+    nvidia: { enabled: true, route: nvidia }
+  registration:
+    openrouter:
+      enabled: true
+      route: free-router-openrouter
+      displayName: Free Router · OpenRouter
+  routing:
+    maxAttemptsPerStep: 4
+    minimumContextWindow: 32768
+    minimumTier: B
+    includeModels: []
+    excludeModels: []
+  health:
+    timeoutMs: 6000
+    concurrency: 4
+    activeProbeIntervalMs: 60000
+    idleProbeIntervalMs: 600000
+    maxCandidatesPerProvider: 8
+```
+
+After the first successful catalog refresh, DSH shows `Free Router · OpenRouter` in its model dropdown. Its registered models are real OpenRouter models and can be selected as the default model. The original `openrouter` route remains available. Setting `registration.openrouter.enabled` to `false` stops synchronization and leaves the managed route in place; it does not delete that route or its last model list.
+
 ## Failure Handling and Privacy
 
 A model is never attempted twice in the same `turn/step`, and there are at most four attempts by default. `UNSUPPORTED_OPTION`, context overflow, and invalid requests are delegated to DSH downstream handling to avoid pointless switching. Consecutive failures use exponential cooldown; authentication, credential, and quota failures isolate the entire provider.

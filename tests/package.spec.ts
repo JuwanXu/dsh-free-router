@@ -1,5 +1,5 @@
 import manifest from '../package.json' with { type: 'json' }
-import { access } from 'node:fs/promises'
+import { access, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
@@ -12,5 +12,11 @@ describe('package manifest', () => {
 
   it('publishes the entry path declared in its manifest', async () => {
     await access(resolve(import.meta.dirname, '..', 'dist', 'index.js'))
+  })
+
+  it('documents dynamic OpenRouter registration', async () => {
+    const readme = await readFile(resolve(import.meta.dirname, '..', 'README.md'), 'utf8')
+    expect(readme).toContain('free-router-openrouter')
+    expect(readme).toContain('registration:')
   })
 })

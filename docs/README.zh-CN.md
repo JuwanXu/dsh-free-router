@@ -69,6 +69,44 @@ free-router:
 
 `route` 是 DSH 中 `llm-pi-ai` 实际注册的 Provider 路由名。`includeModels` 非空时是白名单；`excludeModels` 始终优先排除。没有合格候选或插件关闭时，请求保持原始 DSH 模型配置，不会阻塞对话。
 
+### 动态登记 OpenRouter 免费模型
+
+将 `openrouter` 作为来源路由，并启用下面的 `registration`，即可把合格的 OpenRouter 免费工具模型自动登记到 DSH 模型选择器：
+
+```yaml
+llm-pi-ai:
+  providers:
+    openrouter:
+      apiKeyEnv: OPENROUTER_API_KEY
+      baseURL: https://openrouter.ai/api/v1
+      retryPolicy: { mode: normal, maxRetries: 0 }
+
+free-router:
+  enabled: true
+  providers:
+    openrouter: { enabled: true, route: openrouter }
+    nvidia: { enabled: true, route: nvidia }
+  registration:
+    openrouter:
+      enabled: true
+      route: free-router-openrouter
+      displayName: Free Router · OpenRouter
+  routing:
+    maxAttemptsPerStep: 4
+    minimumContextWindow: 32768
+    minimumTier: B
+    includeModels: []
+    excludeModels: []
+  health:
+    timeoutMs: 6000
+    concurrency: 4
+    activeProbeIntervalMs: 60000
+    idleProbeIntervalMs: 600000
+    maxCandidatesPerProvider: 8
+```
+
+目录首次成功刷新后，DSH 下拉列表会出现 `Free Router · OpenRouter`，其中的模型可以设为默认模型。原始 `openrouter` 路由不会被改写；只有同时满足免费、支持工具调用、上下文窗口和 Tier 要求的模型才会出现。若目标路由已被其他配置占用，注册会停用并保留原配置，请把 `registration.openrouter.route` 改成其他名称后重试。目录短暂失败时，会保留上一份成功登记的模型列表。将 `registration.openrouter.enabled` 设为 `false` 只停止同步，不会删除托管路由或其最后一份模型列表。
+
 ## 故障处理与隐私
 
 同一个 `turn/step` 不会重复尝试同一模型，默认最多尝试 4 个模型。`UNSUPPORTED_OPTION`、上下文溢出和无效请求会交回 DSH 下游处理，避免无意义地切换模型。连续故障采用指数冷却；鉴权、凭据与配额问题会隔离整个 Provider。
@@ -88,4 +126,3 @@ pnpm run test:smoke
 ## 许可与归因
 
 代码采用 [MIT](./LICENSE) 许可。模型 Tier 数据的来源和许可说明见 [data/ATTRIBUTION.md](./data/ATTRIBUTION.md)。
-

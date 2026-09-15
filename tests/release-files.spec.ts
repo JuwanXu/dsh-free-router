@@ -1,3 +1,4 @@
+import manifest from '../package.json' with { type: 'json' }
 import { access, readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -10,5 +11,11 @@ describe('release files', () => {
     expect(workflow).toContain('pnpm run check')
     await access(resolve(root, 'docs', 'release-checklist.md'))
     await access(resolve(root, 'LICENSE'))
+  })
+
+  it('ships user documentation but excludes internal planning records', () => {
+    const packageFiles = manifest.files as string[]
+    expect(packageFiles).toContain('docs/README.zh-CN.md')
+    expect(packageFiles.some((file) => file.includes('/docs/superpowers/'))).toBe(false)
   })
 })
