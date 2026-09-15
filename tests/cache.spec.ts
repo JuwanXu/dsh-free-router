@@ -20,7 +20,7 @@ const record = {
 const claim = {
   sourceRoute: 'openrouter',
   targetRoute: 'free-router-openrouter',
-  profileSignature: 'opaque-profile-signature',
+  profileSignature: 'a'.repeat(64),
   modelIds: ['first:free', 'second:free'],
 }
 
@@ -91,6 +91,23 @@ describe('FileRouterCache', () => {
 
     expect(plan.claim.profileSignature).toMatch(/^[a-f0-9]{64}$/)
     await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|Bearer|secret|visible-header-value/)
+  })
+
+  it('downgrades a legacy plaintext v2 claim and strips it on the next save', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const legacySignature = '{"profile":{"headers":{"Authorization":"Bearer old-cache-secret"}}}'
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: { ...claim, profileSignature: legacySignature } },
+    }))
+
+    const loaded = await cache.load(1_500)
+    expect(loaded?.version).toBe(2)
+    expect(loaded?.registrations).toEqual({})
+    await cache.save(loaded!)
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|Bearer|old-cache-secret/)
   })
 
   it('rejects v2 records with invalid managed claims', async () => {

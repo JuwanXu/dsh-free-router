@@ -22,6 +22,16 @@ interface LegacyRouterCacheRecord {
   health: Record<string, HealthSnapshot>
 }
 
+interface V2CacheRecordInput {
+  version: 2
+  updatedAt: number
+  candidates: CandidateModel[]
+  health: Record<string, HealthSnapshot>
+  registrations: {
+    openrouter?: unknown
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -93,24 +103,31 @@ function hasValidCacheContents(value: unknown): value is {
     && Object.values(candidate.health).every(isHealthSnapshot)
 }
 
-function isManagedRouteClaim(value: unknown): value is ManagedRouteClaim {
+function hasManagedRouteClaimFields(value: unknown): value is Omit<ManagedRouteClaim, 'profileSignature'> & {
+  profileSignature: string
+} {
   if (!isRecord(value) || !Array.isArray(value.modelIds)) return false
   return typeof value.sourceRoute === 'string' && value.sourceRoute.length > 0
     && typeof value.targetRoute === 'string' && value.targetRoute.length > 0
-    && typeof value.profileSignature === 'string' && value.profileSignature.length > 0
+    && typeof value.profileSignature === 'string'
     && value.modelIds.every((modelId) => typeof modelId === 'string' && modelId.length > 0)
     && new Set(value.modelIds).size === value.modelIds.length
+}
+
+function isManagedRouteClaim(value: unknown): value is ManagedRouteClaim {
+  return hasManagedRouteClaimFields(value)
+    && /^[a-f0-9]{64}$/.test(value.profileSignature)
 }
 
 function isLegacyCacheRecord(value: unknown): value is LegacyRouterCacheRecord {
   return hasValidCacheContents(value) && isRecord(value) && value.version === 1
 }
 
-function isCacheRecord(value: unknown): value is RouterCacheRecord {
+function isCacheRecord(value: unknown): value is V2CacheRecordInput {
   if (!hasValidCacheContents(value) || !isRecord(value) || value.version !== 2 || !isRecord(value.registrations)) return false
   const registrations = value.registrations
   return Object.keys(registrations).every((key) => key === 'openrouter')
-    && (registrations.openrouter === undefined || isManagedRouteClaim(registrations.openrouter))
+    && (registrations.openrouter === undefined || hasManagedRouteClaimFields(registrations.openrouter))
 }
 
 function copyManagedRouteClaim(claim: ManagedRouteClaim): ManagedRouteClaim {
@@ -176,7 +193,7 @@ export class FileRouterCache {
           key,
           normalizeHealthSnapshot(snapshot),
         ])),
-        registrations: isCacheRecord(parsed) && parsed.registrations.openrouter !== undefined
+        registrations: isCacheRecord(parsed) && isManagedRouteClaim(parsed.registrations.openrouter)
           ? { openrouter: copyManagedRouteClaim(parsed.registrations.openrouter) }
           : {},
       }

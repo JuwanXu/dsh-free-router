@@ -39,6 +39,16 @@ describe('reconcileManagedRoute', () => {
     }, plan(), undefined)).toEqual({ kind: 'conflict', reason: 'target-exists' })
   })
 
+  it('does not take ownership of an existing target without a valid cached claim', () => {
+    const legacyPlan: ManagedRoutePlan = {
+      ...plan(),
+      claim: { ...claim, profileSignature: '{"headers":{"Authorization":"Bearer old-cache-secret"}}' },
+    }
+
+    expect(reconcileManagedRoute(existingManagedProviders, legacyPlan, undefined))
+      .toEqual({ kind: 'conflict', reason: 'target-exists' })
+  })
+
   it('requires the opaque profile signature before accepting a prior claim', () => {
     expect(reconcileManagedRoute(existingManagedProviders, plan(), {
       ...claim,
