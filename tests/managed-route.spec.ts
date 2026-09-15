@@ -19,7 +19,9 @@ const sourceProfile = {
   baseURL: 'https://openrouter.ai/api/v1',
   api: 'openai-completions',
   retryPolicy: { mode: 'normal', maxRetries: 0 },
+  displayName: 'Source Provider',
   models: [{ id: 'manual' }],
+  modelOverrides: { manual: { contextWindow: 1 } },
   apiKey: 'must-not-copy',
 }
 
@@ -33,6 +35,8 @@ describe('planManagedRoute', () => {
       models: [{ id: 'a:free' }, { id: 'b:free' }],
     })
     expect(JSON.stringify(plan)).not.toContain('must-not-copy')
+    expect(JSON.stringify(plan)).not.toContain('Source Provider')
+    expect(JSON.stringify(plan)).not.toContain('modelOverrides')
     expect(plan.profile).not.toHaveProperty('modelOverrides')
   })
 
@@ -47,5 +51,29 @@ describe('planManagedRoute', () => {
     planManagedRoute(source, 'openrouter', registration, models)
     expect(source).toEqual({ headers: { 'X-Test': 'source' } })
     expect(models).toEqual([candidate('a:free')])
+  })
+
+  it('safely copies own __proto__ JSON data and includes it in the signature', () => {
+    const source = JSON.parse('{"headers":{"__proto__":{"injected":"value"}}}') as Record<string, unknown>
+    const plan = planManagedRoute(source, 'openrouter', registration, [])
+    const headers = plan.profile.headers as Record<string, unknown>
+
+    expect(Object.getPrototypeOf(headers)).toBeNull()
+    expect(Object.prototype.hasOwnProperty.call(headers, '__proto__')).toBe(true)
+    expect(headers['__proto__']).toEqual({ injected: 'value' })
+    expect(({} as Record<string, unknown>).injected).toBeUndefined()
+
+    const changed = JSON.parse('{"headers":{"__proto__":{"injected":"changed"}}}') as Record<string, unknown>
+    expect(plan.claim.profileSignature).not.toBe(planManagedRoute(changed, 'openrouter', registration, []).claim.profileSignature)
+  })
+
+  it('deduplicates equal model IDs deterministically across metadata and input order', () => {
+    const first = { ...candidate('same:free'), displayName: 'Zulu', contextWindow: 32_768 }
+    const second = { ...candidate('same:free'), displayName: 'Alpha', contextWindow: 65_536 }
+    const forward = planManagedRoute(sourceProfile, 'openrouter', registration, [first, second])
+    const reverse = planManagedRoute(sourceProfile, 'openrouter', registration, [second, first])
+
+    expect(forward).toEqual(reverse)
+    expect(forward.profile.models).toEqual([{ id: 'same:free', name: 'Alpha', contextWindow: 65_536 }])
   })
 })

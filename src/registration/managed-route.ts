@@ -23,10 +23,15 @@ function copyJson(value: unknown): JsonValue | undefined {
     return value.map((item) => copyJson(item)).filter((item): item is JsonValue => item !== undefined)
   }
   if (isRecord(value)) {
-    const copy: Record<string, JsonValue> = {}
+    const copy = Object.create(null) as Record<string, JsonValue>
     for (const key of Object.keys(value)) {
       const item = copyJson(value[key])
-      if (item !== undefined) copy[key] = item
+      if (item !== undefined) Object.defineProperty(copy, key, {
+        configurable: true,
+        enumerable: true,
+        value: item,
+        writable: true,
+      })
     }
     return copy
   }
@@ -36,7 +41,16 @@ function copyJson(value: unknown): JsonValue | undefined {
 function sortKeys(value: JsonValue): JsonValue {
   if (Array.isArray(value)) return value.map(sortKeys)
   if (value !== null && typeof value === 'object') {
-    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, sortKeys(value[key])]))
+    const sorted = Object.create(null) as Record<string, JsonValue>
+    for (const key of Object.keys(value).sort()) {
+      Object.defineProperty(sorted, key, {
+        configurable: true,
+        enumerable: true,
+        value: sortKeys(value[key]),
+        writable: true,
+      })
+    }
+    return sorted
   }
   return value
 }
