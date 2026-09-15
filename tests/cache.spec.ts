@@ -6,13 +6,21 @@ import { HealthBook } from '../src/health.js'
 import { FileRouterCache } from '../src/persistence/cache.js'
 
 const record = {
-  version: 1 as const,
+  version: 2 as const,
   updatedAt: 1_000,
   candidates: [{
     provider: 'openrouter', model: 'free:free', displayName: 'Free', contextWindow: 65_536,
     toolCalling: true, free: true, tier: 'A', catalogUpdatedAt: 1_000,
   }],
   health: {},
+  registrations: {},
+}
+
+const claim = {
+  sourceRoute: 'openrouter',
+  targetRoute: 'free-router-openrouter',
+  profileSignature: 'opaque-profile-signature',
+  modelIds: ['first:free', 'second:free'],
 }
 
 describe('FileRouterCache', () => {
@@ -39,6 +47,53 @@ describe('FileRouterCache', () => {
 
     await cache.save(unsafe as typeof record)
     await expect(readFile(path, 'utf8')).resolves.not.toMatch(/sk-or-test-secret|Bearer secret/)
+  })
+
+  it('migrates a v1 cache with no claim', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await writeFile(path, JSON.stringify({ ...record, version: 1, registrations: undefined }))
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({ version: 2, registrations: {} })
+  })
+
+  it('persists only a valid managed route claim without profile or secret fields', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+
+    await cache.save({
+      ...record,
+      registrations: {
+        openrouter: {
+          ...claim,
+          profile: { headers: { Authorization: 'Bearer sk-or-test-secret' } },
+          apiKey: 'sk-or-test-secret',
+        } as typeof claim,
+      },
+    })
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({ registrations: { openrouter: claim } })
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|sk-or-test-secret/)
+  })
+
+  it('rejects v2 records with invalid managed claims', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: claim },
+    }))
+    await expect(cache.load(1_500)).resolves.toMatchObject({ registrations: { openrouter: claim } })
+
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: { ...claim, modelIds: ['first:free', 'first:free'] } },
+    }))
+
+    await expect(cache.load(1_500)).resolves.toBeUndefined()
   })
 
   it('round-trips an unknown latency through JSON null', async () => {
