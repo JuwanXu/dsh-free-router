@@ -6,9 +6,26 @@ export const FREE_ROUTER_SETTINGS_NAMESPACE = 'free-router'
 
 export type { ProviderConfig } from './providers.js'
 
+export interface OpenRouterRegistrationConfig {
+  enabled: boolean
+  route: string
+  displayName: string
+}
+
+const defaultRegistration = {
+  openrouter: {
+    enabled: false,
+    route: 'free-router-openrouter',
+    displayName: 'Free Router · OpenRouter',
+  },
+} as const
+
 export interface RouterConfig {
   enabled: boolean
   providers: Record<ProviderKey, ProviderConfig>
+  registration: {
+    openrouter: OpenRouterRegistrationConfig
+  }
   routing: {
     maxAttemptsPerStep: number
     minimumContextWindow: number
@@ -28,6 +45,7 @@ export interface RouterConfig {
 export const defaultConfig: RouterConfig = {
   enabled: true,
   providers: defaultProviderConfigs(),
+  registration: defaultRegistration,
   routing: {
     maxAttemptsPerStep: 4,
     minimumContextWindow: 32_768,
@@ -55,6 +73,13 @@ const providerSettings = z.object(Object.fromEntries(providerDescriptors.map(({ 
 export const Config: z<RouterConfig> = z.object({
   enabled: z.boolean().default(defaultConfig.enabled),
   providers: providerSettings.default(defaultConfig.providers),
+  registration: z.object({
+    openrouter: z.object({
+      enabled: z.boolean().default(defaultRegistration.openrouter.enabled),
+      route: z.string().min(1).default(defaultRegistration.openrouter.route),
+      displayName: z.string().min(1).default(defaultRegistration.openrouter.displayName),
+    }).default(defaultRegistration.openrouter),
+  }).default(defaultRegistration),
   routing: z.object({
     maxAttemptsPerStep: z.number().step(1).min(1).max(32).default(defaultConfig.routing.maxAttemptsPerStep),
     minimumContextWindow: z.number().step(1).min(1).default(defaultConfig.routing.minimumContextWindow),
@@ -95,10 +120,23 @@ function validateStringList(value: unknown, label: string): string[] {
   return [...value]
 }
 
+function readRegistration(value: unknown, sourceRoute: string): OpenRouterRegistrationConfig {
+  const registrationInput = mergeRecord(defaultConfig.registration, value, 'registration')
+  const input = mergeRecord(defaultRegistration.openrouter, registrationInput.openrouter, 'registration.openrouter')
+  if (typeof input.enabled !== 'boolean' || typeof input.route !== 'string' || input.route.length === 0 ||
+      typeof input.displayName !== 'string' || input.displayName.length === 0) {
+    throw new TypeError('registration.openrouter must contain enabled, route, and displayName')
+  }
+  if (input.enabled && input.route === sourceRoute) {
+    throw new TypeError('registration.openrouter.route must differ from providers.openrouter.route')
+  }
+  return { enabled: input.enabled, route: input.route, displayName: input.displayName }
+}
+
 /** Parse an entry config without relying on Settings to be installed. */
 export function parseConfig(value: unknown): RouterConfig {
   if (!isRecord(value)) throw new TypeError('free-router config must be an object')
-  const unknownTopLevel = Object.keys(value).filter((key) => !['enabled', 'providers', 'routing', 'health'].includes(key))
+  const unknownTopLevel = Object.keys(value).filter((key) => !['enabled', 'providers', 'registration', 'routing', 'health'].includes(key))
   if (unknownTopLevel.length > 0) throw new TypeError(`unknown config fields: ${unknownTopLevel.join(', ')}`)
 
   const providersInput = mergeRecord(defaultConfig.providers, value.providers, 'providers')
@@ -117,9 +155,14 @@ export function parseConfig(value: unknown): RouterConfig {
   if (typeof value.enabled !== 'undefined' && typeof value.enabled !== 'boolean') throw new TypeError('enabled must be boolean')
   if (!tiers.includes(routingInput.minimumTier as ModelTier)) throw new TypeError('routing.minimumTier is invalid')
 
+  const providers = Object.fromEntries(providerDescriptors.map(({ key }) => [key, readProvider(key)])) as RouterConfig['providers']
+
   return {
     enabled: value.enabled ?? defaultConfig.enabled,
-    providers: Object.fromEntries(providerDescriptors.map(({ key }) => [key, readProvider(key)])) as RouterConfig['providers'],
+    providers,
+    registration: {
+      openrouter: readRegistration(value.registration, providers.openrouter.route),
+    },
     routing: {
       maxAttemptsPerStep: validateNumber(routingInput.maxAttemptsPerStep, 'routing.maxAttemptsPerStep', 1, 32),
       minimumContextWindow: validateNumber(routingInput.minimumContextWindow, 'routing.minimumContextWindow', 1),

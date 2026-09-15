@@ -29,4 +29,30 @@ describe('parseConfig', () => {
 
     expect(config.providers).toEqual(expected)
   })
+
+  it('keeps dynamic registration disabled by default', () => {
+    expect(parseConfig({}).registration.openrouter).toEqual({
+      enabled: false,
+      route: 'free-router-openrouter',
+      displayName: 'Free Router · OpenRouter',
+    })
+  })
+
+  it('rejects an enabled registrar targeting its source route', () => {
+    expect(() => parseConfig({
+      providers: { openrouter: { route: 'openrouter' } },
+      registration: { openrouter: { enabled: true, route: 'openrouter' } },
+    })).toThrow(/must differ/)
+  })
+
+  it('accepts a distinct managed route', () => {
+    expect(parseConfig({ registration: { openrouter: {
+      enabled: true, route: 'free-router-or', displayName: 'Managed OR',
+    } } }).registration.openrouter.route).toBe('free-router-or')
+  })
+
+  it.each([
+    { registration: { openrouter: { route: '' } } },
+    { registration: { openrouter: { displayName: '' } } },
+  ])('rejects malformed registration %#', (value) => expect(() => parseConfig(value)).toThrow())
 })
