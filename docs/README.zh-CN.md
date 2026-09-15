@@ -107,6 +107,42 @@ free-router:
 
 目录首次成功刷新后，DSH 下拉列表会出现 `Free Router · OpenRouter`，其中的模型可以设为默认模型。原始 `openrouter` 路由不会被改写；只有同时满足免费、支持工具调用、上下文窗口和 Tier 要求的模型才会出现。若目标路由已被其他配置占用，注册会停用并保留原配置，请把 `registration.openrouter.route` 改成其他名称后重试。目录短暂失败时，会保留上一份成功登记的模型列表。将 `registration.openrouter.enabled` 设为 `false` 只停止同步，不会删除托管路由或其最后一份模型列表。
 
+### 与 Camel、Continue 组合使用
+
+`dsh-free-router`、`dsh-camel` 与 `dsh-continue` 可以安装到同一份 DSH profile，但同一类故障只能由一个插件接管：
+
+- **Free Router** 负责免费模型请求的 `RATE_LIMIT`：记录当前模型不可用，并在同一步切换到另一个合格候选。
+- **Camel** 可以继续进行请求节流，但其重试策略必须不接管 `RATE_LIMIT`；否则 Camel 会在 Free Router 切换前对同一模型反复重试。
+- **Continue** 仅处理 `TIMEOUT`、`TRANSPORT`、`SERVER` 等临时网络故障。
+
+推荐的三插件组合配置是保留 Camel 节流、关闭其限流重试：
+
+```yaml
+# DSH profile 中 camel 插件的 patch 配置
+- id: camel
+  config:
+    defaults:
+      throttle:
+        enabled: true
+        maxRequests: 5
+        windowMs: 60000
+        scope: route
+      retry:
+        enabled: false
+```
+
+OpenRouter 的 `RATE_LIMIT` 可能是单模型限流，也可能是账户级免费模型配额耗尽。前者存在其他合格候选时会自动切换；后者会让所有免费候选都收到同一错误，路由无法绕过，需要等待供应商额度重置或为账户充值。
+
+### 手工验证
+
+通过 DSH 正常启动 Web profile，并使用启动时打印的带认证地址打开页面：
+
+```bash
+dsh --profile web --host 127.0.0.1 --port 3082
+```
+
+不要在另一个浏览器上下文直接打开裸地址 `http://127.0.0.1:3082/`。DSH Web 使用进程级浏览器令牌保护 API；认证页面中选择 `Free Router · OpenRouter`、新建会话并发送一条简短请求后，模型选择器应展示动态登记的免费模型。
+
 ## 故障处理与隐私
 
 同一个 `turn/step` 不会重复尝试同一模型，默认最多尝试 4 个模型。`UNSUPPORTED_OPTION`、上下文溢出和无效请求会交回 DSH 下游处理，避免无意义地切换模型。连续故障采用指数冷却；鉴权、凭据与配额问题会隔离整个 Provider。

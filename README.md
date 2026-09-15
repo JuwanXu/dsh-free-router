@@ -109,6 +109,42 @@ free-router:
 
 After the first successful catalog refresh, DSH shows `Free Router · OpenRouter` in its model dropdown. Its registered models are real OpenRouter models and can be selected as the default model. The original `openrouter` route remains available. Setting `registration.openrouter.enabled` to `false` stops synchronization and leaves the managed route in place; it does not delete that route or its last model list.
 
+### Using it with Camel and Continue
+
+`dsh-free-router`, `dsh-camel`, and `dsh-continue` can be installed in the same DSH profile. Give each failure class one owner:
+
+- **Free Router** owns `RATE_LIMIT` for free-model requests. It marks the failed model unhealthy and retries the step with a different eligible model.
+- **Camel** may still pace requests, but its retry policy must exclude `RATE_LIMIT`; otherwise Camel retries the same model before Free Router can switch it.
+- **Continue** should own only transient network failures such as `TIMEOUT`, `TRANSPORT`, and `SERVER`.
+
+For the common three-plugin setup, keep Camel throttling enabled and disable its rate-limit retry:
+
+```yaml
+# DSH profile patch for the camel plugin
+- id: camel
+  config:
+    defaults:
+      throttle:
+        enabled: true
+        maxRequests: 5
+        windowMs: 60000
+        scope: route
+      retry:
+        enabled: false
+```
+
+An OpenRouter `RATE_LIMIT` can be model-specific or account-wide. The router can recover from a model-specific limit when another eligible model is available. It cannot bypass OpenRouter's account-wide free-model quota: when every candidate receives the same quota error, wait for the provider reset or add provider credit.
+
+### Manual verification
+
+Start the Web profile normally and open the authenticated URL printed by DSH:
+
+```bash
+dsh --profile web --host 127.0.0.1 --port 3082
+```
+
+Do not open a bare `http://127.0.0.1:3082/` URL in a different browser context; DSH Web protects its API with a per-process browser token. In the authenticated page, select `Free Router · OpenRouter`, create a new session, and send a short request. The model picker should list the dynamically registered free models.
+
 ## Failure Handling and Privacy
 
 A model is never attempted twice in the same `turn/step`, and there are at most four attempts by default. `UNSUPPORTED_OPTION`, context overflow, and invalid requests are delegated to DSH downstream handling to avoid pointless switching. Consecutive failures use exponential cooldown; authentication, credential, and quota failures isolate the entire provider.
