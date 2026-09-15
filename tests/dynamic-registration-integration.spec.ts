@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import type { LlmCallConfig } from '@deepseek-ai/dsh-llm'
+import { readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -193,6 +194,30 @@ describe('dynamic free-model registration', () => {
     expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute, model: 'first:free' })
     started.releaseProbes()
     await started.dispose()
+  })
+
+  it('keeps ordinary source headers but excludes credentials from Settings mutations and cache', async () => {
+    const home = join(tmpdir(), `dsh-free-router-test-${Date.now()}-header-projection`)
+    process.env.DSH_HOME = home
+    const started = await startPlugin({
+      source: {
+        ...sourceProfile,
+        headers: {
+          'X-Client': 'free-router',
+          Authorization: 'Bearer settings-secret',
+          'Proxy-Authorization': 'Basic proxy-secret',
+          'X-API-Key': 'api-key-secret',
+          'api-key': 'duplicate-api-key-secret',
+        },
+      },
+    })
+
+    const registered = started.mutations[0]?.ops[0]?.value as { headers?: unknown }
+    expect(registered.headers).toEqual({ 'X-Client': 'free-router' })
+    expect(JSON.stringify(started.mutations)).not.toMatch(/settings-secret|proxy-secret|api-key-secret|duplicate-api-key-secret/)
+    await started.dispose()
+    await expect(readFile(join(home, 'cache', 'free-router.json'), 'utf8'))
+      .resolves.not.toMatch(/settings-secret|proxy-secret|api-key-secret|duplicate-api-key-secret/)
   })
 
   it('does not overwrite an unmanaged target route', async () => {

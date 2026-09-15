@@ -40,6 +40,29 @@ describe('planManagedRoute', () => {
     expect(plan.profile).not.toHaveProperty('modelOverrides')
   })
 
+  it('keeps ordinary headers while stripping case-insensitive credential headers', () => {
+    const plan = planManagedRoute({
+      headers: {
+        'X-Client': 'free-router',
+        Authorization: 'Bearer authorization-secret',
+        'Proxy-Authorization': 'Basic proxy-secret',
+        'x-api-key': 'x-api-key-secret',
+        'API-Key': 'api-key-secret',
+      },
+    }, 'openrouter', registration, [])
+
+    expect(plan.profile.headers).toEqual({ 'X-Client': 'free-router' })
+    expect(JSON.stringify(plan)).not.toMatch(/authorization-secret|proxy-secret|x-api-key-secret|api-key-secret/)
+  })
+
+  it('omits headers when every source header is sensitive', () => {
+    const plan = planManagedRoute({
+      headers: { authorization: 'Bearer secret', 'X-API-KEY': 'secret-key' },
+    }, 'openrouter', registration, [])
+
+    expect(plan.profile).not.toHaveProperty('headers')
+  })
+
   it('creates equal plans regardless of catalog order', () => {
     expect(planManagedRoute(sourceProfile, 'openrouter', registration, [candidate('b:free'), candidate('a:free')]))
       .toEqual(planManagedRoute(sourceProfile, 'openrouter', registration, [candidate('a:free'), candidate('b:free')]))

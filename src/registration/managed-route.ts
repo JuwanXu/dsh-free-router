@@ -10,6 +10,13 @@ const COPIED_PROFILE_FIELDS = [
   'requestImagePixelBudget', 'requestImageMaxBytes',
 ] as const
 
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'x-api-key',
+  'api-key',
+])
+
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -37,6 +44,23 @@ function copyJson(value: unknown): JsonValue | undefined {
     return copy
   }
   return undefined
+}
+
+function copyHeaders(value: unknown): JsonValue | undefined {
+  if (!isRecord(value)) return copyJson(value)
+  const headers = Object.create(null) as Record<string, JsonValue>
+  for (const key of Object.keys(value)) {
+    if (SENSITIVE_HEADER_NAMES.has(key.toLowerCase())) continue
+    const item = copyJson(value[key])
+    if (item === undefined) continue
+    Object.defineProperty(headers, key, {
+      configurable: true,
+      enumerable: true,
+      value: item,
+      writable: true,
+    })
+  }
+  return Object.keys(headers).length === 0 ? undefined : headers
 }
 
 function sortKeys(value: JsonValue): JsonValue {
@@ -69,7 +93,7 @@ export function planManagedRoute(
   const profile: Record<string, unknown> = {}
   for (const field of COPIED_PROFILE_FIELDS) {
     if (!Object.prototype.hasOwnProperty.call(sourceProfile, field)) continue
-    const value = copyJson(sourceProfile[field])
+    const value = field === 'headers' ? copyHeaders(sourceProfile[field]) : copyJson(sourceProfile[field])
     if (value !== undefined) profile[field] = value
   }
 
