@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { CandidateModel } from '../types.js'
 import type { ManagedRoutePlan, ManagedRouteRegistration } from './types.js'
 
@@ -86,11 +87,11 @@ export function planManagedRoute(
 
   const staticProfile = { ...profile }
   delete staticProfile.models
-  const profileSignature = canonicalJson({
+  const profileSignature = createHash('sha256').update(canonicalJson({
     sourceRoute,
     targetRoute: registration.route,
     profile: staticProfile as { [key: string]: JsonValue },
-  })
+  })).digest('hex')
   return {
     targetRoute: registration.route,
     profile,

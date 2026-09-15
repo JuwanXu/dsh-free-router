@@ -5,7 +5,7 @@ import type { ManagedRouteClaim, ManagedRoutePlan } from '../src/registration/ty
 const claim: ManagedRouteClaim = {
   sourceRoute: 'openrouter',
   targetRoute: 'free-router-openrouter',
-  profileSignature: 'opaque-profile-signature',
+  profileSignature: 'a'.repeat(64),
   modelIds: ['first:free'],
 }
 

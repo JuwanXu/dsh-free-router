@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HealthBook } from '../src/health.js'
 import { FileRouterCache } from '../src/persistence/cache.js'
+import { planManagedRoute } from '../src/registration/managed-route.js'
 
 const record = {
   version: 2 as const,
@@ -76,6 +77,20 @@ describe('FileRouterCache', () => {
 
     await expect(cache.load(1_500)).resolves.toMatchObject({ registrations: { openrouter: claim } })
     await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|sk-or-test-secret/)
+  })
+
+  it('persists a hashed signature without source header values', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const plan = planManagedRoute({
+      headers: { Authorization: 'Bearer secret', 'X-Non-Sensitive': 'visible-header-value' },
+    }, 'openrouter', { route: 'free-router-openrouter', displayName: 'Free Router · OpenRouter' }, [])
+
+    await cache.save({ ...record, registrations: { openrouter: plan.claim } })
+
+    expect(plan.claim.profileSignature).toMatch(/^[a-f0-9]{64}$/)
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|Bearer|secret|visible-header-value/)
   })
 
   it('rejects v2 records with invalid managed claims', async () => {
