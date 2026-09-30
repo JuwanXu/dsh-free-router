@@ -20,6 +20,11 @@ import { HealthBook } from './health.js'
 import { FileRouterCache } from './persistence/cache.js'
 import { planManagedRoute } from './registration/managed-route.js'
 import { reconcileManagedRoute } from './registration/reconciler.js'
+import {
+  createConfigEditorRegistrationSettings,
+  type ConfigEditor,
+  type RegistrationSettings,
+} from './registration/config-editor-settings.js'
 import type { ManagedRouteClaim } from './registration/types.js'
 import { createRouterRuntime } from './runtime/router.js'
 import { candidateKey, type CandidateModel } from './types.js'
@@ -167,11 +172,6 @@ function providerProfiles(value: unknown): Record<string, unknown> | undefined {
   return providers !== null && typeof providers === 'object' && !Array.isArray(providers)
     ? providers as Record<string, unknown>
     : undefined
-}
-
-interface RegistrationSettings {
-  get(namespace: string): unknown
-  mutate(namespace: string, ops: readonly { op: 'set' | 'unset', path: readonly string[], value?: unknown }[]): Promise<void>
 }
 
 interface ProviderTopology {
@@ -586,16 +586,42 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     return () => runtime.dispose()
   }, 'free-router：健康监测生命周期')
   ctx.inject(['settings'], (settingsCtx) => {
-    registrationSettings = settingsCtx.settings as unknown as RegistrationSettings
-    settingsCtx.settings.installSection(ctx, FREE_ROUTER_SETTINGS_NAMESPACE, ConfigSchema, current(), {
-      setSource: (source) => {
-        current = () => {
-          lastValidConfig = parseConfig(source())
-          return lastValidConfig
-        }
-      },
-      onChange: () => scheduleRefresh('topology'),
-    })
+    const settings = settingsCtx.settings as unknown as {
+      configure?: (presentation: { auto: boolean }, owner: unknown) => (() => void) | void
+      get?: (namespace: string) => unknown
+      mutate?: RegistrationSettings['mutate']
+      installSection?: (context: Context, namespace: string, schema: unknown, entry: RouterConfig, hooks: {
+        setSource(source: () => unknown): void
+        onChange(): void
+      }) => void
+    }
+    if (typeof settings.get === 'function' && typeof settings.mutate === 'function') {
+      registrationSettings = { get: settings.get.bind(settings), mutate: settings.mutate.bind(settings) }
+    }
+    if (typeof settings.installSection === 'function') {
+      settings.installSection(ctx, FREE_ROUTER_SETTINGS_NAMESPACE, ConfigSchema, current(), {
+        setSource: (source) => {
+          current = () => {
+            lastValidConfig = parseConfig(source())
+            return lastValidConfig
+          }
+        },
+        onChange: () => scheduleRefresh('topology'),
+      })
+    } else if (typeof settings.configure === 'function') {
+      ctx.effect(() => settings.configure!({ auto: false }, ctx.fiber) ?? (() => {}))
+    }
+    if (!initialRefreshScheduled) {
+      initialRefreshScheduled = true
+      scheduleRefresh()
+    }
+  })
+  ctx.inject(['configEditor'], (editorCtx) => {
+    if (registrationSettings === undefined) {
+      registrationSettings = createConfigEditorRegistrationSettings(
+        (editorCtx as unknown as { configEditor: ConfigEditor }).configEditor,
+      )
+    }
     if (!initialRefreshScheduled) {
       initialRefreshScheduled = true
       scheduleRefresh()
