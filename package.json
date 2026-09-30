@@ -1,6 +1,6 @@
 {
   "name": "dsh-free-router",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Request-level free model routing for DeepSeek Harness",
   "license": "MIT",
   "repository": {

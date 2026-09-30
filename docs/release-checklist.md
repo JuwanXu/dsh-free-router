@@ -1,22 +1,30 @@
-# 发布检查清单
+# Release checklist for the package author
 
-## 本地验证
+This checklist is for the package author. It does not grant permission to publish from this workspace. Stop after preparing and validating the tarball; the author decides when to run `npm publish`.
 
-1. 使用 Node.js 22.19+ 与 pnpm 11.7.0 执行 `pnpm install --frozen-lockfile`。
-2. 执行 `pnpm run check && pnpm run test:integration && pnpm run test:smoke`。
-3. 执行 `pnpm pack --pack-destination .tmp-pack`，确认 tarball 仅含 `dist`、`data`、`README.md`、`LICENSE`、`package.json` 和 `cordis.patch.yml`。
-4. 在干净的完整 DSH profile 中执行 `dsh plugin --profile web add file:/绝对路径/dsh-free-router`。
-5. 未设置任何 Provider 凭据时启动 DSH，确认插件保留原模型配置且不报错。
+## Validate and pack
 
-## 可选真实连通性
+1. Use Node.js 22.19+ and pnpm 11.7.0; install dependencies with `pnpm install --frozen-lockfile`.
+2. Run `pnpm run check`, `pnpm run test:integration`, and `pnpm run test:smoke`.
+3. Run `pnpm pack` and inspect the generated `dsh-free-router-0.1.3.tgz`. It should include the built `dist` command module and both `README.md` and `docs/README.zh-CN.md`.
+4. Install the tarball into a temporary DSH profile:
 
-1. 只配置 NVIDIA NIM 凭据，确认可选择静态目录中的免费 tool-calling 模型。
-2. 只配置 OpenRouter 凭据，确认实时目录只纳入免费且支持 tools 的模型。
-3. 同时配置两个 Provider，制造单模型限流或临时服务错误，确认后续尝试切换到不同候选。
-4. 检查 Settings、日志与缓存文件，确认没有 API key、Bearer header 或原始请求内容。
+   ```bash
+   dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.3.tgz
+   ```
 
-## 发布资料
+## Verify Desktop DSH 0.2.0-rc.2
 
-1. 核对 `LICENSE` 为 MIT，`data/ATTRIBUTION.md` 保留模型 Tier 数据来源与许可。
-2. 审核 README 的 DSH 版本、安装命令和 Provider 配置示例是否仍与当前 DSH 匹配。
-3. 变更静态 NVIDIA 目录或 Tier 映射时，更新归因说明、测试 fixture 和版本号。
+1. In the temporary profile, accept the exact compatibility exception:
+
+   ```bash
+   dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.3 --dsh-version 0.2.0-rc.2 --accept-risk
+   ```
+
+2. Open the Desktop app with the temporary profile and run `/free-router refresh`. Confirm the command reports refresh counts, registration outcome, model additions/removals, and sanitized failure codes.
+3. Run `/free-router status` and confirm it shows the latest report without initiating another refresh.
+4. Review both READMEs for the default zero-price discovery switch, Tier `?`, meta-router exclusion, and provider logging/training privacy note.
+
+## Publish decision (author only)
+
+After all checks and Desktop verification pass, the package author may run `npm publish`. Do not publish from automated preparation or validation steps.

@@ -52,13 +52,15 @@ The plugin registers the `free-router` namespace in DSH Settings. Its complete d
 ```yaml
 free-router:
   enabled: true
+  catalog:
+    zeroPricedWithoutSuffix: true
   providers:
     openrouter: { enabled: true, route: openrouter }
     nvidia: { enabled: true, route: nvidia }
   routing:
     maxAttemptsPerStep: 4
     minimumContextWindow: 32768
-    minimumTier: B
+    minimumTier: '?'
     includeModels: []
     excludeModels: []
   health:
@@ -107,7 +109,11 @@ free-router:
     maxCandidatesPerProvider: 8
 ```
 
-After the first successful catalog refresh, DSH shows `Free Router · OpenRouter` in its model dropdown. Its registered models are real OpenRouter models and can be selected as the default model. The original `openrouter` route remains available. Setting `registration.openrouter.enabled` to `false` stops synchronization and leaves the managed route in place; it does not delete that route or its last model list.
+After the first successful catalog refresh, DSH shows `Free Router · OpenRouter` in its model dropdown. Its registered models are real OpenRouter models and can be selected as the default model. The original `openrouter` route remains available. The meta-router model `openrouter/free` is deliberately excluded; configure the underlying free models directly. Setting `registration.openrouter.enabled` to `false` stops synchronization and leaves the managed route in place; it does not delete that route or its last model list.
+
+The catalog accepts models with zero prompt and completion prices even when their IDs lack a `:free` suffix. Set `catalog.zeroPricedWithoutSuffix: false` to restore the previous suffix-only rule. By default, `routing.minimumTier: '?'` allows models without a curated tier rating; choose a stricter tier to narrow the candidates. You can also explicitly exclude IDs such as `openrouter/free` with `routing.excludeModels` (the meta-router itself remains excluded regardless).
+
+In a DSH session, `/free-router refresh` runs discovery, eligibility filtering, managed-route reconciliation, and cache update, then reports counts, registration result, model additions/removals, and safe failure codes. `/free-router status` shows the last report without starting network work; before the first refresh it reports `no refresh report`.
 
 ### Using it with Camel and Continue
 
@@ -149,7 +155,20 @@ Do not open a bare `http://127.0.0.1:3082/` URL in a different browser context; 
 
 A model is never attempted twice in the same `turn/step`, and there are at most four attempts by default. `UNSUPPORTED_OPTION`, context overflow, and invalid requests are delegated to DSH downstream handling to avoid pointless switching. Consecutive failures use exponential cooldown; authentication, credential, and quota failures isolate the entire provider.
 
-The cache is stored at `$DSH_HOME/cache/free-router.json` and uses an allowlisted projection that contains only version, timestamps, public model metadata, and health values. An expired cache is used only as a cold-start ranking hint and never marks a model as currently available. Credentials remain exclusively managed by DSH `llm-pi-ai` and credentials services.
+The cache is stored at `$DSH_HOME/cache/free-router.json` and uses an allowlisted projection that contains only version, timestamps, public model metadata, and health values. An expired cache is used only as a cold-start ranking hint and never marks a model as currently available. Credentials remain exclusively managed by DSH `llm-pi-ai` and credentials services. Some stealth/cloaked models with zero prices may be logged by their provider or used for training; enabling discovery makes them eligible for routing, so review provider terms and exclude any model you do not want to use.
+
+### Desktop release candidate
+
+For DSH Desktop `0.2.0-rc.2`, install a locally packed build into a temporary profile and explicitly accept the exact package-version compatibility exception:
+
+```bash
+pnpm run check
+pnpm pack
+dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.3.tgz
+dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.3 --dsh-version 0.2.0-rc.2 --accept-risk
+```
+
+Open the Desktop app with that profile and run `/free-router refresh` to verify it. See the [author-only release checklist](./docs/release-checklist.md); only the package author should publish.
 
 ## Development and Verification
 
