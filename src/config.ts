@@ -12,6 +12,10 @@ export interface OpenRouterRegistrationConfig {
   displayName: string
 }
 
+export interface CatalogConfig {
+  zeroPricedWithoutSuffix: boolean
+}
+
 const defaultRegistration = {
   openrouter: {
     enabled: false,
@@ -22,6 +26,7 @@ const defaultRegistration = {
 
 export interface RouterConfig {
   enabled: boolean
+  catalog: CatalogConfig
   providers: Record<ProviderKey, ProviderConfig>
   registration: {
     openrouter: OpenRouterRegistrationConfig
@@ -44,12 +49,13 @@ export interface RouterConfig {
 
 export const defaultConfig: RouterConfig = {
   enabled: true,
+  catalog: { zeroPricedWithoutSuffix: true },
   providers: defaultProviderConfigs(),
   registration: defaultRegistration,
   routing: {
     maxAttemptsPerStep: 4,
     minimumContextWindow: 32_768,
-    minimumTier: 'B',
+    minimumTier: '?',
     includeModels: [],
     excludeModels: [],
   },
@@ -72,6 +78,9 @@ const providerSettings = z.object(Object.fromEntries(providerDescriptors.map(({ 
 /** DSH Settings schema, including defaults so an empty user section is usable. */
 export const Config: z<RouterConfig> = z.object({
   enabled: z.boolean().default(defaultConfig.enabled),
+  catalog: z.object({
+    zeroPricedWithoutSuffix: z.boolean().default(defaultConfig.catalog.zeroPricedWithoutSuffix),
+  }).default(defaultConfig.catalog),
   providers: providerSettings.default(defaultConfig.providers),
   registration: z.object({
     openrouter: z.object({
@@ -136,10 +145,11 @@ function readRegistration(value: unknown, sourceRoute: string): OpenRouterRegist
 /** Parse an entry config without relying on Settings to be installed. */
 export function parseConfig(value: unknown): RouterConfig {
   if (!isRecord(value)) throw new TypeError('free-router config must be an object')
-  const unknownTopLevel = Object.keys(value).filter((key) => !['enabled', 'providers', 'registration', 'routing', 'health'].includes(key))
+  const unknownTopLevel = Object.keys(value).filter((key) => !['enabled', 'catalog', 'providers', 'registration', 'routing', 'health'].includes(key))
   if (unknownTopLevel.length > 0) throw new TypeError(`unknown config fields: ${unknownTopLevel.join(', ')}`)
 
   const providersInput = mergeRecord(defaultConfig.providers, value.providers, 'providers')
+  const catalogInput = mergeRecord(defaultConfig.catalog, value.catalog, 'catalog')
   const unknownProviders = Object.keys(providersInput).filter((key) => !providerKeys.has(key as typeof providerDescriptors[number]['key']))
   if (unknownProviders.length > 0) throw new TypeError(`unknown providers: ${unknownProviders.join(', ')}`)
   const readProvider = (key: ProviderKey): ProviderConfig => {
@@ -153,12 +163,14 @@ export function parseConfig(value: unknown): RouterConfig {
   const routingInput = mergeRecord(defaultConfig.routing, value.routing, 'routing')
   const healthInput = mergeRecord(defaultConfig.health, value.health, 'health')
   if (typeof value.enabled !== 'undefined' && typeof value.enabled !== 'boolean') throw new TypeError('enabled must be boolean')
+  if (typeof catalogInput.zeroPricedWithoutSuffix !== 'boolean') throw new TypeError('catalog.zeroPricedWithoutSuffix must be boolean')
   if (!tiers.includes(routingInput.minimumTier as ModelTier)) throw new TypeError('routing.minimumTier is invalid')
 
   const providers = Object.fromEntries(providerDescriptors.map(({ key }) => [key, readProvider(key)])) as RouterConfig['providers']
 
   return {
     enabled: value.enabled ?? defaultConfig.enabled,
+    catalog: { zeroPricedWithoutSuffix: catalogInput.zeroPricedWithoutSuffix },
     providers,
     registration: {
       openrouter: readRegistration(value.registration, providers.openrouter.route),

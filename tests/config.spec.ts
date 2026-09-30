@@ -10,9 +10,18 @@ describe('parseConfig', () => {
     expect(config.routing).toMatchObject({
       maxAttemptsPerStep: 4,
       minimumContextWindow: 32_768,
-      minimumTier: 'B',
+      minimumTier: '?',
     })
+    expect(config.catalog).toEqual({ zeroPricedWithoutSuffix: true })
     expect(config.providers.openrouter).toEqual({ enabled: true, route: 'openrouter' })
+  })
+
+  it('parses zero-priced model catalog policy strictly', () => {
+    expect(parseConfig({ catalog: { zeroPricedWithoutSuffix: false } }).catalog)
+      .toEqual({ zeroPricedWithoutSuffix: false })
+    expect(() => parseConfig({ catalog: null })).toThrow(TypeError)
+    expect(() => parseConfig({ catalog: { zeroPricedWithoutSuffix: 'false' } })).toThrow(TypeError)
+    expect(() => parseConfig({ catalog: { zeroPricedWithoutSuffix: true }, unexpected: true })).toThrow(TypeError)
   })
 
   it('rejects invalid attempt budgets and unknown providers', () => {

@@ -2,7 +2,31 @@ import { describe, expect, it } from 'vitest'
 import { OpenRouterCatalogSource } from '../src/catalog/openrouter.js'
 
 describe('OpenRouterCatalogSource', () => {
-  it('keeps only free tool-calling models with a free route', async () => {
+  it('uses zero pricing and the suffix policy to qualify safe tool models', async () => {
+    const eligible = (id: string, extra: Record<string, unknown> = {}) => ({
+      id, name: id, context_length: 65_536,
+      pricing: { prompt: '0', completion: '0' }, supported_parameters: ['tools'], ...extra,
+    })
+    const data = [
+      eligible('org/suffixed:free'), eligible('stealth/space-bunny-alpha'), eligible('openrouter/free'),
+      eligible('org/paid', { pricing: { prompt: '0.01', completion: '0' } }),
+      eligible('org/missing-pricing', { pricing: undefined }),
+      eligible('org/no-tools', { supported_parameters: [] }),
+      eligible('org/zero-context', { context_length: 0 }),
+      eligible('org/negative-context', { context_length: -1 }),
+      eligible('org/unsafe-context', { context_length: Number.MAX_SAFE_INTEGER + 1 }),
+    ]
+    const fetchImpl = async () => new Response(JSON.stringify({ data }))
+    const defaultSource = new OpenRouterCatalogSource(fetchImpl)
+    const compatibilitySource = new OpenRouterCatalogSource(fetchImpl, undefined, undefined, undefined, false)
+
+    expect((await defaultSource.load(new AbortController().signal)).map(({ model }) => model))
+      .toEqual(['org/suffixed:free', 'stealth/space-bunny-alpha'])
+    expect((await compatibilitySource.load(new AbortController().signal)).map(({ model }) => model))
+      .toEqual(['org/suffixed:free'])
+  })
+
+  it('keeps only zero-priced tool-calling models', async () => {
     const source = new OpenRouterCatalogSource(async () => new Response(JSON.stringify({
       data: [
         {
@@ -26,9 +50,11 @@ describe('OpenRouterCatalogSource', () => {
 
     const models = await source.load(new AbortController().signal)
 
-    expect(models).toMatchObject([{
-      provider: 'openrouter', model: 'org/free-tools:free', toolCalling: true, free: true,
-    }])
+    expect(models.map(({ model }) => model)).toEqual(['org/not-a-free-route', 'org/free-tools:free'])
+    expect(models).toMatchObject([
+      { provider: 'openrouter', model: 'org/not-a-free-route', toolCalling: true, free: true },
+      { provider: 'openrouter', model: 'org/free-tools:free', toolCalling: true, free: true },
+    ])
   })
 
   it('rejects a malformed directory response', async () => {
