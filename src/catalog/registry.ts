@@ -11,6 +11,49 @@ export class CatalogRegistry {
     private readonly sourceTimeoutMs = 10_000,
   ) {}
 
+  async discover(
+    enabledProviders: ReadonlySet<string>,
+    signal: AbortSignal,
+    previous: readonly CandidateModel[] = [],
+    onSourceFailure?: (provider: string) => void,
+  ): Promise<CandidateModel[]> {
+    const activeSources = this.sources.filter((source) => (
+      source.provider === undefined || enabledProviders.has(source.provider)
+    ))
+    const results = await Promise.allSettled(activeSources.map((source) => this.loadSource(source, signal)))
+    const failedProviders = new Set(results.flatMap((result, index) => (
+      result.status === 'rejected' && activeSources[index]?.provider !== undefined
+        ? [activeSources[index].provider]
+        : []
+    )))
+    if (!signal.aborted) {
+      for (const provider of failedProviders) onSourceFailure?.(provider)
+    }
+    const groups = results.flatMap((result) => result.status === 'fulfilled' ? [result.value] : [])
+    const retained = previous.filter((candidate) => failedProviders.has(candidate.provider))
+    const seen = new Set<string>()
+    return [...groups.flat(), ...retained].filter((candidate) => {
+      const key = candidateKey(candidate)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  executable(
+    candidates: readonly CandidateModel[],
+    executable: ReadonlyMap<string, ReadonlySet<string>>,
+  ): CandidateModel[] {
+    const seen = new Set<string>()
+    return candidates.filter((candidate) => {
+      if (!executable.get(candidate.provider)?.has(candidate.model)) return false
+      const key = candidateKey(candidate)
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
   async refresh(
     executable: ReadonlyMap<string, ReadonlySet<string>>,
     signal: AbortSignal,

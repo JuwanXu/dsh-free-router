@@ -4,15 +4,24 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { HealthBook } from '../src/health.js'
 import { FileRouterCache } from '../src/persistence/cache.js'
+import { planManagedRoute } from '../src/registration/managed-route.js'
 
 const record = {
-  version: 1 as const,
+  version: 2 as const,
   updatedAt: 1_000,
   candidates: [{
     provider: 'openrouter', model: 'free:free', displayName: 'Free', contextWindow: 65_536,
     toolCalling: true, free: true, tier: 'A', catalogUpdatedAt: 1_000,
   }],
   health: {},
+  registrations: {},
+}
+
+const claim = {
+  sourceRoute: 'openrouter',
+  targetRoute: 'free-router-openrouter',
+  profileSignature: 'a'.repeat(64),
+  modelIds: ['first:free', 'second:free'],
 }
 
 describe('FileRouterCache', () => {
@@ -39,6 +48,84 @@ describe('FileRouterCache', () => {
 
     await cache.save(unsafe as typeof record)
     await expect(readFile(path, 'utf8')).resolves.not.toMatch(/sk-or-test-secret|Bearer secret/)
+  })
+
+  it('migrates a v1 cache with no claim', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await writeFile(path, JSON.stringify({ ...record, version: 1, registrations: undefined }))
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({ version: 2, registrations: {} })
+  })
+
+  it('persists only a valid managed route claim without profile or secret fields', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+
+    await cache.save({
+      ...record,
+      registrations: {
+        openrouter: {
+          ...claim,
+          profile: { headers: { Authorization: 'Bearer sk-or-test-secret' } },
+          apiKey: 'sk-or-test-secret',
+        } as typeof claim,
+      },
+    })
+
+    await expect(cache.load(1_500)).resolves.toMatchObject({ registrations: { openrouter: claim } })
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|sk-or-test-secret/)
+  })
+
+  it('persists a hashed signature without source header values', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const plan = planManagedRoute({
+      headers: { Authorization: 'Bearer secret', 'X-Non-Sensitive': 'visible-header-value' },
+    }, 'openrouter', { route: 'free-router-openrouter', displayName: 'Free Router · OpenRouter' }, [])
+
+    await cache.save({ ...record, registrations: { openrouter: plan.claim } })
+
+    expect(plan.claim.profileSignature).toMatch(/^[a-f0-9]{64}$/)
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|Bearer|secret|visible-header-value/)
+  })
+
+  it('downgrades a legacy plaintext v2 claim and strips it on the next save', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    const legacySignature = '{"profile":{"headers":{"Authorization":"Bearer old-cache-secret"}}}'
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: { ...claim, profileSignature: legacySignature } },
+    }))
+
+    const loaded = await cache.load(1_500)
+    expect(loaded?.version).toBe(2)
+    expect(loaded?.registrations).toEqual({})
+    await cache.save(loaded!)
+    await expect(readFile(path, 'utf8')).resolves.not.toMatch(/Authorization|Bearer|old-cache-secret/)
+  })
+
+  it('rejects v2 records with invalid managed claims', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dsh-free-router-'))
+    const path = join(directory, 'router.json')
+    const cache = new FileRouterCache(path, 1_000)
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: claim },
+    }))
+    await expect(cache.load(1_500)).resolves.toMatchObject({ registrations: { openrouter: claim } })
+
+    await writeFile(path, JSON.stringify({
+      ...record,
+      registrations: { openrouter: { ...claim, modelIds: ['first:free', 'first:free'] } },
+    }))
+
+    await expect(cache.load(1_500)).resolves.toBeUndefined()
   })
 
   it('round-trips an unknown latency through JSON null', async () => {

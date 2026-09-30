@@ -1,14 +1,35 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import type { ManagedRouteClaim } from '../registration/types.js'
 import type { CandidateModel, HealthRecoverySnapshot, HealthSnapshot } from '../types.js'
 
 export interface RouterCacheRecord {
+  version: 2
+  updatedAt: number
+  candidates: CandidateModel[]
+  health: Record<string, HealthSnapshot>
+  registrations: {
+    openrouter?: ManagedRouteClaim
+  }
+  /** 仅存在于内存中的标记：该记录只能作为冷启动排序参考。 */
+  stale?: true
+}
+
+interface LegacyRouterCacheRecord {
   version: 1
   updatedAt: number
   candidates: CandidateModel[]
   health: Record<string, HealthSnapshot>
-  /** 仅存在于内存中的标记：该记录只能作为冷启动排序参考。 */
-  stale?: true
+}
+
+interface V2CacheRecordInput {
+  version: 2
+  updatedAt: number
+  candidates: CandidateModel[]
+  health: Record<string, HealthSnapshot>
+  registrations: {
+    openrouter?: unknown
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -65,16 +86,57 @@ function validCoolingUntil(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }
 
-function isCacheRecord(value: unknown): value is RouterCacheRecord {
+function hasValidCacheContents(value: unknown): value is {
+  version: unknown
+  registrations?: unknown
+  updatedAt: number
+  candidates: CandidateModel[]
+  health: Record<string, HealthSnapshot>
+} {
   if (!isRecord(value)) return false
   const candidate = value as Partial<RouterCacheRecord>
-  return candidate.version === 1
-    && typeof candidate.updatedAt === 'number'
+  return typeof candidate.updatedAt === 'number'
     && Number.isFinite(candidate.updatedAt)
     && Array.isArray(candidate.candidates)
     && candidate.candidates.every(isCandidate)
     && isRecord(candidate.health)
     && Object.values(candidate.health).every(isHealthSnapshot)
+}
+
+function hasManagedRouteClaimFields(value: unknown): value is Omit<ManagedRouteClaim, 'profileSignature'> & {
+  profileSignature: string
+} {
+  if (!isRecord(value) || !Array.isArray(value.modelIds)) return false
+  return typeof value.sourceRoute === 'string' && value.sourceRoute.length > 0
+    && typeof value.targetRoute === 'string' && value.targetRoute.length > 0
+    && typeof value.profileSignature === 'string'
+    && value.modelIds.every((modelId) => typeof modelId === 'string' && modelId.length > 0)
+    && new Set(value.modelIds).size === value.modelIds.length
+}
+
+function isManagedRouteClaim(value: unknown): value is ManagedRouteClaim {
+  return hasManagedRouteClaimFields(value)
+    && /^[a-f0-9]{64}$/.test(value.profileSignature)
+}
+
+function isLegacyCacheRecord(value: unknown): value is LegacyRouterCacheRecord {
+  return hasValidCacheContents(value) && isRecord(value) && value.version === 1
+}
+
+function isCacheRecord(value: unknown): value is V2CacheRecordInput {
+  if (!hasValidCacheContents(value) || !isRecord(value) || value.version !== 2 || !isRecord(value.registrations)) return false
+  const registrations = value.registrations
+  return Object.keys(registrations).every((key) => key === 'openrouter')
+    && (registrations.openrouter === undefined || hasManagedRouteClaimFields(registrations.openrouter))
+}
+
+function copyManagedRouteClaim(claim: ManagedRouteClaim): ManagedRouteClaim {
+  return {
+    sourceRoute: claim.sourceRoute,
+    targetRoute: claim.targetRoute,
+    profileSignature: claim.profileSignature,
+    modelIds: [...claim.modelIds],
+  }
 }
 
 function normalizeHealthSnapshot(snapshot: HealthSnapshot): HealthSnapshot {
@@ -122,15 +184,18 @@ export class FileRouterCache {
   async load(now: number): Promise<RouterCacheRecord | undefined> {
     try {
       const parsed: unknown = JSON.parse(await readFile(this.path, 'utf8'))
-      if (!isCacheRecord(parsed)) return undefined
+      if (!isLegacyCacheRecord(parsed) && !isCacheRecord(parsed)) return undefined
       const record: RouterCacheRecord = {
-        version: 1,
+        version: 2,
         updatedAt: parsed.updatedAt,
         candidates: parsed.candidates.map((candidate) => ({ ...candidate })),
         health: Object.fromEntries(Object.entries(parsed.health).map(([key, snapshot]) => [
           key,
           normalizeHealthSnapshot(snapshot),
         ])),
+        registrations: isCacheRecord(parsed) && isManagedRouteClaim(parsed.registrations.openrouter)
+          ? { openrouter: copyManagedRouteClaim(parsed.registrations.openrouter) }
+          : {},
       }
       return now - record.updatedAt > this.ttlMs
         ? { ...record, candidates: [], stale: true }
@@ -140,15 +205,15 @@ export class FileRouterCache {
     }
   }
 
-  save(record: RouterCacheRecord): Promise<void> {
+  save(record: RouterCacheRecord | LegacyRouterCacheRecord): Promise<void> {
     const operation = this.writeTail.then(() => this.writeRecord(record))
     this.writeTail = operation.catch(() => {})
     return operation
   }
 
-  private async writeRecord(record: RouterCacheRecord): Promise<void> {
+  private async writeRecord(record: RouterCacheRecord | LegacyRouterCacheRecord): Promise<void> {
     const safe: RouterCacheRecord = {
-      version: 1,
+      version: 2,
       updatedAt: record.updatedAt,
       candidates: record.candidates.map((candidate) => ({
         provider: candidate.provider,
@@ -169,6 +234,9 @@ export class FileRouterCache {
         ...(snapshot.lastFailureCode === undefined ? {} : { lastFailureCode: snapshot.lastFailureCode }),
         ...(snapshot.recovery === undefined ? {} : { recovery: copyRecoverySnapshot(snapshot.recovery) }),
       }])),
+      registrations: record.version === 2 && isManagedRouteClaim(record.registrations.openrouter)
+        ? { openrouter: copyManagedRouteClaim(record.registrations.openrouter) }
+        : {},
     }
     await mkdir(dirname(this.path), { recursive: true })
     const temporary = `${this.path}.tmp`

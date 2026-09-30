@@ -18,8 +18,12 @@ function zeroPrice(value: unknown): boolean {
   return Number.isFinite(parsed) && parsed === 0
 }
 
-function modelFrom(value: OpenRouterModel, updatedAt: number): CandidateModel | undefined {
-  if (typeof value.id !== 'string' || !value.id.endsWith(':free')) return undefined
+export function allowedOpenRouterModelId(id: string, zeroPricedWithoutSuffix: boolean): boolean {
+  return id !== 'openrouter/free' && (id.endsWith(':free') || zeroPricedWithoutSuffix)
+}
+
+function modelFrom(value: OpenRouterModel, updatedAt: number, zeroPricedWithoutSuffix: boolean): CandidateModel | undefined {
+  if (typeof value.id !== 'string' || !allowedOpenRouterModelId(value.id, zeroPricedWithoutSuffix)) return undefined
   if (!value.pricing || !zeroPrice(value.pricing.prompt) || !zeroPrice(value.pricing.completion)) return undefined
   if (!Array.isArray(value.supported_parameters) || !value.supported_parameters.includes('tools')) return undefined
   const contextWindow = value.context_length
@@ -44,6 +48,7 @@ export class OpenRouterCatalogSource {
     private readonly endpoint = modelsEndpoint,
     private readonly now: () => number = Date.now,
     private readonly timeoutMs = 6_000,
+    private readonly zeroPricedWithoutSuffix = true,
   ) {}
 
   async load(signal: AbortSignal): Promise<CandidateModel[]> {
@@ -56,7 +61,7 @@ export class OpenRouterCatalogSource {
     }
     const updatedAt = this.now()
     return (payload as { data: OpenRouterModel[] }).data
-      .map((model) => modelFrom(model, updatedAt))
+      .map((model) => modelFrom(model, updatedAt, this.zeroPricedWithoutSuffix))
       .filter((model): model is CandidateModel => model !== undefined)
   }
 }
