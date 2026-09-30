@@ -6,6 +6,8 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { CatalogRegistry } from './catalog/registry.js'
+import { registerFreeRouterCommands, type FreeRouterCommandRegistry } from './commands.js'
+import { createRefreshReport, type CreateRefreshReportInput, type RefreshReport } from './refresh-report.js'
 import {
   Config as ConfigSchema,
   FREE_ROUTER_SETTINGS_NAMESPACE,
@@ -236,6 +238,9 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   let cachedManagedClaim: ManagedRouteClaim | undefined
   let pendingManagedAdapterVerification: ManagedRouteClaim | undefined
   let lastDiscovered: CandidateModel[] = []
+  let lastReport: RefreshReport | undefined
+  let pendingReport: Omit<CreateRefreshReportInput, 'completedAt'> | undefined
+  const refreshWaiters: Array<{ generation: number, requiresDiscovery: boolean, resolve: (report: RefreshReport) => void }> = []
   const isolationRefreshPending = new Map<string, IsolationRefreshIntent>()
   let initialRefreshCompleted = false
   let lastTopology = new Map<string, ProviderTopology>()
@@ -244,7 +249,6 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   const cacheTasks = new Set<Promise<void>>()
   const logger = ctx.logger('free-router')
   const warn = createThrottledWarning(logger)
-  const catalog = new CatalogRegistry(providerCatalogSources())
   const health = new HealthBook({ baseCooldownMs: 5_000, maxCooldownMs: 10 * 60_000, sampleSize: 20 })
   const cache = new FileRouterCache(dshHomePath('cache', 'free-router.json'), 24 * 60 * 60_000)
   const persistCache = (): void => {
@@ -262,7 +266,10 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       () => cacheTasks.delete(task),
     )
   }
-  let triggerRefresh: () => void = () => {}
+  let triggerRefresh: () => Promise<RefreshReport> = async () => lastReport ?? createRefreshReport({
+    startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
+    previousModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
+  })
   const runtime = createRouterRuntime({
     getConfig: () => effectiveRoutes(current(), registrationSettings !== undefined),
     getCandidates: () => candidates,
@@ -319,14 +326,30 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     if (!refreshAbort.signal.aborted) logger.warn(`free-router: 缓存加载失败（错误码：${safeErrorCode(error)}）`)
   })
 
-  const refresh = async (generation: number): Promise<void> => {
+  const refresh = async (generation: number): Promise<RefreshReport | undefined> => {
     await cacheLoad
     if (generation !== refreshGeneration || refreshAbort.signal.aborted) return
     const config = current()
+    const verifying = pendingManagedAdapterVerification !== undefined
+    const catalog = new CatalogRegistry(providerCatalogSources(config.catalog))
+    const startedAt = pendingReport?.startedAt ?? Date.now()
+    let draft: Omit<CreateRefreshReportInput, 'completedAt'> = pendingReport ?? {
+      startedAt, discoveredModelIds: [], eligibleModelIds: [],
+      previousModelIds: lastDiscovered.map((candidate) => candidate.model),
+      registrationKind: 'skipped', failures: [],
+    }
+    const failures = [...draft.failures]
+    const complete = (): RefreshReport => {
+      pendingReport = undefined
+      persistCache()
+      runtime.wake()
+      return createRefreshReport({ ...draft, failures, candidateCount: candidates.length, completedAt: Date.now() })
+    }
     try {
       const previous = sourceCatalogCandidates(candidates, config)
-      const discovered = pendingManagedAdapterVerification === undefined
+      const discovered = !verifying
         ? await catalog.discover(enabledSources(config), refreshAbort.signal, previous, (provider) => {
+          failures.push({ provider, code: 'UNKNOWN' })
           const descriptor = providerDescriptors.find(({ source }) => source === provider)
           if (generation !== refreshGeneration
             || refreshAbort.signal.aborted
@@ -337,9 +360,16 @@ export function apply(ctx: Context, entry: RouterConfig): void {
         : lastDiscovered
       if (generation !== refreshGeneration || refreshAbort.signal.aborted) return
 
-      if (pendingManagedAdapterVerification === undefined) lastDiscovered = discovered
+      if (!verifying) {
+        lastDiscovered = discovered
+        draft = {
+          ...draft,
+          discoveredModelIds: discovered.map((candidate) => candidate.model),
+          eligibleModelIds: discovered.filter((candidate) => eligible(candidate, config.routing)).map((candidate) => candidate.model),
+        }
+      }
       const registration = config.registration.openrouter
-      if (registrationSettings !== undefined && registration.enabled && pendingManagedAdapterVerification === undefined) {
+      if (registrationSettings !== undefined && registration.enabled && !verifying) {
         const profiles = providerProfiles(registrationSettings.get('llm-pi-ai'))
         const sourceRoute = config.providers.openrouter.route
         const sourceProfile = profiles?.[sourceRoute]
@@ -349,7 +379,9 @@ export function apply(ctx: Context, entry: RouterConfig): void {
           || typeof sourceProfile !== 'object'
           || Array.isArray(sourceProfile)) {
           warn('registration:openrouter:missing-source-profile', 'OpenRouter 来源配置缺失；继续保留上次验证通过的候选')
-          return
+          draft = { ...draft, registrationKind: 'skipped', registrationReason: 'missing-source-profile' }
+          failures.push({ provider: 'registration', code: 'ENOENT' })
+          return complete()
         }
         const planned = planManagedRoute(
           sourceProfile as Record<string, unknown>,
@@ -359,20 +391,31 @@ export function apply(ctx: Context, entry: RouterConfig): void {
         )
         const reconciliation = reconcileManagedRoute(profiles, planned, cachedManagedClaim)
         if (reconciliation.kind === 'conflict') {
+          draft = { ...draft, registrationKind: 'conflict', registrationReason: reconciliation.reason }
+          failures.push({ provider: 'registration', code: 'INVARIANT' })
           candidates = candidates.filter((candidate) => candidate.provider !== registration.route)
-          persistCache()
-          runtime.wake()
           warn(`registration:openrouter:${reconciliation.reason}`, '托管 OpenRouter 路由已由其他配置占用；已移除该路由的候选')
-          return
+          return complete()
         }
         if (reconciliation.kind === 'create' || reconciliation.kind === 'update') {
-          await registrationSettings.mutate('llm-pi-ai', reconciliation.ops)
+          draft = { ...draft, registrationKind: reconciliation.kind }
+          pendingReport = { ...draft, failures }
+          pendingManagedAdapterVerification = reconciliation.claim
+          try {
+            await registrationSettings.mutate('llm-pi-ai', reconciliation.ops)
+          } catch (error) {
+            pendingManagedAdapterVerification = undefined
+            draft = { ...draft, registrationKind: 'error' }
+            failures.push({ provider: 'registration', code: safeErrorCode(error) })
+            return complete()
+          }
           if (refreshAbort.signal.aborted) return
           cachedManagedClaim = reconciliation.claim
-          pendingManagedAdapterVerification = reconciliation.claim
           persistCache()
+          if (generation === refreshGeneration) void scheduleRefresh(undefined, true)
           return
         }
+        draft = { ...draft, registrationKind: 'unchanged' }
         cachedManagedClaim = reconciliation.claim
       }
 
@@ -398,6 +441,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
           ? `${source} 的路由 ${route} 未激活；请在 DSH Models 中配置对应适配器和凭据`
           : `路由 ${route} 的模型目录不可用；继续保留 ${source} 上次验证通过的模型`
         warn(`route:${source}:${route}:${issue}`, description)
+        failures.push({ provider: source, code: issue === 'missing' ? 'ENOENT' : 'UNKNOWN' })
       }
       if (generation === refreshGeneration && !refreshAbort.signal.aborted) {
         const observedTopology = providerTopologies(effectiveConfig, executable.models)
@@ -426,18 +470,39 @@ export function apply(ctx: Context, entry: RouterConfig): void {
         lastTopology = topology
         initialRefreshCompleted = true
         if (pendingManagedAdapterVerification !== undefined) pendingManagedAdapterVerification = undefined
-        persistCache()
-        runtime.wake()
+        return complete()
       }
     } catch (error) {
+      pendingManagedAdapterVerification = undefined
+      failures.push({ provider: 'refresh', code: safeErrorCode(error) })
       if (!refreshAbort.signal.aborted) {
         logger.warn(`free-router: 模型目录刷新失败，继续使用已知候选（错误码：${safeErrorCode(error)}）`)
       }
+      if (!refreshAbort.signal.aborted) return complete()
     }
   }
   const beginRefresh = (): void => {
     refreshInFlight = true
-    const task = refresh(refreshGeneration)
+    const generation = refreshGeneration
+    const verifying = pendingManagedAdapterVerification !== undefined
+    const task = refresh(generation).catch((error: unknown) => {
+      pendingReport = undefined
+      pendingManagedAdapterVerification = undefined
+      logger.warn(`free-router: 模型目录刷新失败，继续使用已知候选（错误码：${safeErrorCode(error)}）`)
+      return createRefreshReport({
+        startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
+        previousModelIds: [], candidateCount: candidates.length, registrationKind: 'skipped',
+        failures: [{ provider: 'refresh', code: safeErrorCode(error) }],
+      })
+    }).then((report) => {
+      if (report === undefined) return
+      lastReport = report
+      if (verifying && refreshWaiters.some((waiter) => waiter.requiresDiscovery)) void scheduleRefresh()
+      for (let index = refreshWaiters.length - 1; index >= 0; index -= 1) {
+        if (refreshWaiters[index].generation > generation || (verifying && refreshWaiters[index].requiresDiscovery)) continue
+        refreshWaiters.splice(index, 1)[0].resolve(report)
+      }
+    })
     refreshTasks.add(task)
     const finish = (): void => {
       refreshTasks.delete(task)
@@ -449,8 +514,12 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     }
     void task.then(finish, finish)
   }
-  const scheduleRefresh = (intent?: IsolationRefreshIntent): void => {
-    if (refreshAbort.signal.aborted) return
+  const cancelledReport = (): RefreshReport => createRefreshReport({
+    startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
+    previousModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
+  })
+  const scheduleRefresh = (intent?: IsolationRefreshIntent, verificationOnly = false): Promise<RefreshReport> => {
+    if (refreshAbort.signal.aborted) return Promise.resolve(cancelledReport())
     if (intent !== undefined) {
       for (const { source } of providerDescriptors) {
         const previous = isolationRefreshPending.get(source)
@@ -458,11 +527,14 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       }
     }
     refreshGeneration += 1
+    const requiresDiscovery = pendingManagedAdapterVerification !== undefined && intent !== 'adapter' && !verificationOnly
+    const result = new Promise<RefreshReport>((resolve) => refreshWaiters.push({ generation: refreshGeneration, requiresDiscovery, resolve }))
     if (refreshInFlight) {
       refreshQueued = true
-      return
+      return result
     }
     beginRefresh()
+    return result
   }
   triggerRefresh = () => scheduleRefresh()
 
@@ -487,8 +559,19 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       scheduleRefresh()
     }
   })
+  ctx.inject(['commands'], (commandsCtx) => {
+    try {
+      registerFreeRouterCommands((commandsCtx as unknown as { commands: FreeRouterCommandRegistry }).commands, {
+        refresh: () => scheduleRefresh(),
+        status: () => lastReport,
+      })
+    } catch {
+      warn('commands:registration', '会话命令注册失败')
+    }
+  })
   ctx.effect(() => async () => {
     refreshAbort.abort()
+    for (const waiter of refreshWaiters.splice(0)) waiter.resolve(cancelledReport())
     await Promise.allSettled([...refreshTasks])
     await Promise.allSettled([...cacheTasks])
   }, 'free-router：取消模型目录刷新')

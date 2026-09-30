@@ -29,7 +29,9 @@ function renderReport(report: RefreshReport): string {
   return [
     `discovered: ${report.discoveredCount}`,
     `eligible: ${report.eligibleCount}`,
+    `candidates: ${report.candidateCount}`,
     `registration: ${report.registrationKind}`,
+    ...(report.registration.reason === undefined ? [] : [`reason: ${report.registration.reason}`]),
     `added: ${added}`,
     `removed: ${removed}`,
     `failures: ${failures}`,

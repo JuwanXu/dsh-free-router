@@ -3,8 +3,9 @@ const safeErrorCodes = new Set([
   'ENOENT', 'ENOSPC', 'ENOTDIR', 'EPERM', 'EROFS', 'ETIMEDOUT', 'INVARIANT',
   'INVALID_CREDENTIAL', 'MISSING_CREDENTIAL', 'QUOTA', 'TIMEOUT', 'UNKNOWN',
 ])
+const safeRegistrationReasons = new Set(['missing-source-profile', 'target-exists', 'ownership-mismatch'])
 
-export type RegistrationRefreshKind = 'none' | 'create' | 'update' | 'delete' | 'unchanged' | 'error'
+export type RegistrationRefreshKind = 'none' | 'create' | 'update' | 'delete' | 'unchanged' | 'conflict' | 'skipped' | 'error'
 
 export interface RefreshFailure {
   provider: string
@@ -16,7 +17,9 @@ export interface RefreshReport {
   completedAt: number
   discoveredCount: number
   eligibleCount: number
+  candidateCount: number
   registrationKind: RegistrationRefreshKind
+  registration: { kind: RegistrationRefreshKind; reason?: string }
   addedModelIds: readonly string[]
   removedModelIds: readonly string[]
   failures: readonly RefreshFailure[]
@@ -27,8 +30,10 @@ export interface CreateRefreshReportInput {
   completedAt: number
   discoveredModelIds: readonly string[]
   eligibleModelIds: readonly string[]
+  candidateCount?: number
   previousModelIds: readonly string[]
   registrationKind: RegistrationRefreshKind
+  registrationReason?: string
   failures: readonly { provider: string; code?: unknown }[]
 }
 
@@ -50,7 +55,9 @@ export function createRefreshReport(input: CreateRefreshReportInput): RefreshRep
     completedAt: input.completedAt,
     discoveredCount: discovered.length,
     eligibleCount: eligible.length,
+    candidateCount: input.candidateCount ?? 0,
     registrationKind: input.registrationKind,
+    registration: { kind: input.registrationKind, ...(input.registrationReason !== undefined && safeRegistrationReasons.has(input.registrationReason) ? { reason: input.registrationReason } : {}) },
     addedModelIds: discovered.filter((modelId) => !previous.has(modelId)),
     removedModelIds: sortedUnique(input.previousModelIds).filter((modelId) => !current.has(modelId)),
     failures: input.failures.map(({ provider, code }) => ({ provider, code: safeFailureCode(code) }))

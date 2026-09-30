@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseConfig, type RouterConfig } from '../src/config.js'
+import type { FreeRouterCommandRegistry } from '../src/commands.js'
 
 const sourceRoute = 'openrouter'
 const managedRoute = 'free-router-openrouter'
@@ -72,7 +73,13 @@ interface StartedPlugin {
   document: Record<string, unknown>
   modelReads: Map<string, number>
   diagnostics: string[]
+  command?: Parameters<FreeRouterCommandRegistry['register']>[0]
+  updateConfig(config: RouterConfig): void
+  delayCatalog(): { started: Promise<void>, release(): void }
+  delayModelRead(): { started: Promise<void>, release(): void }
+  catalogReads(): number
   failCatalog(): void
+  failMutation(): void
   releaseProbes(): void
   dispose(): Promise<void>
 }
@@ -83,7 +90,10 @@ async function startPlugin(options: {
   source?: Record<string, unknown> | null
   logger?: boolean
   holdProbes?: boolean
+  commands?: boolean | 'throw'
 } = {}): Promise<StartedPlugin> {
+  let activeConfig = options.config ?? registrationConfig()
+  let command: StartedPlugin['command']
   const document: Record<string, unknown> = {
     'llm-pi-ai': {
       providers: {
@@ -95,6 +105,10 @@ async function startPlugin(options: {
   const mutations: StartedPlugin['mutations'] = []
   const modelReads = new Map<string, number>()
   let catalogFailure = false
+  let mutationFailure = false
+  let catalogReadCount = 0
+  let catalogGate: { wait: Promise<void>, started: () => void } | undefined
+  let modelGate: { wait: Promise<void>, started: () => void } | undefined
   let releaseProbes!: () => void
   const probesReleased = new Promise<void>((resolve) => { releaseProbes = resolve })
   const ctx = options.logger === true ? new Context().intercept('logger', { level: 3 }) : new Context()
@@ -107,15 +121,30 @@ async function startPlugin(options: {
     })
   }
   vi.stubGlobal('fetch', async () => {
+    catalogReadCount += 1
+    if (catalogGate !== undefined) {
+      const gate = catalogGate
+      gate.started()
+      await gate.wait
+    }
     if (catalogFailure) throw Object.assign(new Error('Authorization: Bearer catalog-secret'), { code: 'AUTH' })
     return new Response(JSON.stringify({ data: [
       freeModel('first:free', 'First Free'),
       freeModel('second:free', 'Second Free'),
+      freeModel('stealth/space-bunny-alpha', 'Space Bunny'),
+      freeModel('openrouter/free', 'OpenRouter Free'),
     ] }), { status: 200 })
   })
+  if (options.commands) ctx.provide('commands', {
+    register: (registered: NonNullable<StartedPlugin['command']>) => {
+      if (options.commands === 'throw') throw new Error('Bearer command-secret')
+      command = registered
+    },
+  } as never)
   ctx.provide('settings', {
     get: (ns: string) => document[ns],
     mutate: async (ns: string, ops: StartedPlugin['mutations'][number]['ops']) => {
+      if (mutationFailure) throw Object.assign(new Error('Bearer mutation-secret'), { code: 'EIO' })
       mutations.push({ ns, ops: [...ops] })
       const section = document[ns] as Record<string, unknown>
       for (const operation of ops) {
@@ -131,7 +160,7 @@ async function startPlugin(options: {
       ctx.emit('llm/adapters-updated')
     },
     installSection: (_ctx: unknown, _ns: string, _schema: unknown, _entry: unknown, hooks: { setSource(source: () => unknown): void }) => {
-      hooks.setSource(() => options.config ?? registrationConfig())
+      hooks.setSource(() => activeConfig)
     },
   } as never)
   ctx.provide('llm', {
@@ -141,6 +170,11 @@ async function startPlugin(options: {
     },
     listModels: async (route: string) => {
       modelReads.set(route, (modelReads.get(route) ?? 0) + 1)
+      if (route === managedRoute && modelGate !== undefined) {
+        const gate = modelGate
+        gate.started()
+        await gate.wait
+      }
       return route === managedRoute
         ? [{ provider: managedRoute, id: 'first:free', name: 'First Free' }, { provider: managedRoute, id: 'second:free', name: 'Second Free' }]
         : []
@@ -153,7 +187,7 @@ async function startPlugin(options: {
   } as never)
   vi.resetModules()
   const plugin = await import('../src/index.js')
-  const fiber = ctx.plugin(plugin, options.config ?? registrationConfig())
+  const fiber = ctx.plugin(plugin, activeConfig)
   await fiber
   await settleRefreshes()
   return {
@@ -162,7 +196,27 @@ async function startPlugin(options: {
     document,
     modelReads,
     diagnostics,
+    get command() { return command },
+    updateConfig: (config) => { activeConfig = config; ctx.emit('llm/adapters-updated') },
+    delayCatalog: () => {
+      let started!: () => void
+      let release!: () => void
+      const startedPromise = new Promise<void>((resolve) => { started = resolve })
+      const wait = new Promise<void>((resolve) => { release = resolve })
+      catalogGate = { wait, started }
+      return { started: startedPromise, release: () => { catalogGate = undefined; release() } }
+    },
+    delayModelRead: () => {
+      let started!: () => void
+      let release!: () => void
+      const startedPromise = new Promise<void>((resolve) => { started = resolve })
+      const wait = new Promise<void>((resolve) => { release = resolve })
+      modelGate = { wait, started }
+      return { started: startedPromise, release: () => { modelGate = undefined; release() } }
+    },
+    catalogReads: () => catalogReadCount,
     failCatalog: () => { catalogFailure = true },
+    failMutation: () => { mutationFailure = true },
     releaseProbes,
     dispose: () => fiber.dispose(),
   }
@@ -187,12 +241,150 @@ describe('dynamic free-model registration', () => {
         path: ['providers', managedRoute],
         value: expect.objectContaining({
           apiKeyEnv: 'OPENROUTER_API_KEY',
-          models: [expect.objectContaining({ id: 'first:free' }), expect.objectContaining({ id: 'second:free' })],
+          models: [expect.objectContaining({ id: 'first:free' }), expect.objectContaining({ id: 'second:free' }), expect.objectContaining({ id: 'stealth/space-bunny-alpha' })],
         }),
       })],
     })])
     expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute, model: 'first:free' })
     started.releaseProbes()
+    await started.dispose()
+  })
+
+  it('manual refresh removes a zero-priced suffixless model after the catalog policy is disabled', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-policy`)
+    const started = await startPlugin({ commands: true })
+    expect(started.command?.name).toBe('free-router')
+    started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    const profile = (started.document['llm-pi-ai'] as { providers: Record<string, { models: { id: string }[] }> }).providers[managedRoute]
+    expect(profile.models.map((model) => model.id)).not.toContain('stealth/space-bunny-alpha')
+    expect(output.text).toContain('registration: update')
+    expect(output.text).toContain('removed: stealth/space-bunny-alpha')
+    expect(output.text).toContain('candidates: 2')
+    const catalogReads = started.catalogReads()
+    const status = await started.command!.handler({ rawInput: 'status' })
+    expect(status.text).toContain('registration: update')
+    expect(started.catalogReads()).toBe(catalogReads)
+    await started.dispose()
+  })
+
+  it('waits for an overlapping automatic refresh and managed adapter readback before replying', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-overlap`)
+    const started = await startPlugin({ commands: true })
+    const baselineWrites = started.mutations.length
+    const baselineReads = started.modelReads.get(managedRoute) ?? 0
+    const gate = started.delayCatalog()
+    started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
+    await gate.started
+    let settled = false
+    const response = started.command!.handler({ rawInput: 'refresh' }).then((result) => { settled = true; return result })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    gate.release()
+    const output = await response
+    expect(started.mutations).toHaveLength(baselineWrites + 1)
+    expect(started.modelReads.get(managedRoute)).toBeGreaterThan(baselineReads)
+    expect(output.text).toContain('registration: update')
+    expect(output.text).toContain('candidates: 2')
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute, model: 'first:free' })
+    await started.dispose()
+  })
+
+  it('runs a full discovery for a manual request arriving during adapter verification', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-verify-overlap`)
+    const started = await startPlugin({ commands: true })
+    const baselineReads = started.catalogReads()
+    const baselineWrites = started.mutations.length
+    const gate = started.delayModelRead()
+    started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
+    await gate.started
+    let settled = false
+    const response = started.command!.handler({ rawInput: 'refresh' }).then((value) => { settled = true; return value })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    gate.release()
+    const output = await response
+    expect(started.catalogReads()).toBeGreaterThanOrEqual(baselineReads + 2)
+    expect(started.mutations).toHaveLength(baselineWrites + 1)
+    expect(output.text).toContain('registration: unchanged')
+    expect(output.text).toContain('candidates: 2')
+    await started.dispose()
+  })
+
+  it('reports target conflict without overwriting the unmanaged route', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-conflict-report`)
+    const started = await startPlugin({ commands: true, targetProfile: { apiKeyEnv: 'OTHER_KEY' } })
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    expect(started.mutations).toEqual([])
+    expect(output.text).toContain('registration: conflict')
+    expect(output.text).toContain('reason: target-exists')
+    await started.dispose()
+  })
+
+  it('reports a missing source and a failed catalog without exposing secrets or clearing candidates', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-report-failures`)
+    const started = await startPlugin({ commands: true, logger: true })
+    started.failCatalog()
+    const failed = await started.command!.handler({ rawInput: 'refresh' })
+    expect(failed.text).toContain('openrouter:UNKNOWN')
+    expect(failed.text).toContain('candidates: 2')
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+    const providers = (started.document['llm-pi-ai'] as { providers: Record<string, unknown> }).providers
+    delete providers[sourceRoute]
+    const missing = await started.command!.handler({ rawInput: 'refresh' })
+    expect(missing.text).toContain('registration: skipped')
+    expect(missing.text).toContain('reason: missing-source-profile')
+    expect(missing.text).toContain('registration:ENOENT')
+    expect(missing.text).not.toMatch(/Bearer|catalog-secret/)
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+    await started.dispose()
+  })
+
+  it('continues loading when optional command registration throws', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-command-registration`)
+    const started = await startPlugin({ commands: 'throw', logger: true })
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+    expect(started.diagnostics.join('\n')).not.toContain('command-secret')
+    await started.dispose()
+  })
+
+  it('reports a rejected managed write with a safe code and preserves known candidates', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-write-failure`)
+    const started = await startPlugin({ commands: true, logger: true })
+    const baselineWrites = started.mutations.length
+    started.failMutation()
+    started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    expect(output.text).toContain('registration: error')
+    expect(output.text).toContain('registration:EIO')
+    expect(output.text).toContain('candidates: 2')
+    expect(output.text).not.toContain('mutation-secret')
+    expect(started.mutations).toHaveLength(baselineWrites)
+    expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+    await started.dispose()
+  })
+
+  it('settles a pending manual refresh when the plugin is disposed', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-dispose-refresh`)
+    const started = await startPlugin({ commands: true })
+    const gate = started.delayCatalog()
+    const response = started.command!.handler({ rawInput: 'refresh' })
+    await gate.started
+    await started.dispose()
+    const output = await response
+    expect(output.text).toContain('registration: skipped')
+    expect(output.text).toContain('refresh:ABORT_ERR')
+    gate.release()
+  })
+
+  it('reports invalid live Settings safely and retains the previous candidate snapshot', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-settings-failure`)
+    const started = await startPlugin({ commands: true, logger: true })
+    started.updateConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: 'invalid' } } as unknown as RouterConfig)
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    expect(output.text).toContain('refresh:UNKNOWN')
+    expect(output.text).toContain('candidates: 2')
+    expect(output.text).not.toContain('invalid')
     await started.dispose()
   })
 

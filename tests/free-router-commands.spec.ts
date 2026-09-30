@@ -18,6 +18,7 @@ function report(): RefreshReport {
     completedAt: 150,
     discoveredModelIds: ['nvidia/a', 'openrouter/b'],
     eligibleModelIds: ['nvidia/a', 'openrouter/b'],
+    candidateCount: 2,
     previousModelIds: ['nvidia/a', 'removed/c'],
     registrationKind: 'update',
     failures: [{ provider: 'openrouter', code: 'TIMEOUT' }],
@@ -45,6 +46,7 @@ describe('free-router command boundary', () => {
     expect(output.kind).toBe('success')
     expect(output.text).toContain('discovered: 2')
     expect(output.text).toContain('eligible: 2')
+    expect(output.text).toContain('candidates: 2')
     expect(output.text).toContain('registration: update')
     expect(output.text).toContain('added: openrouter/b')
     expect(output.text).toContain('removed: removed/c')
@@ -66,6 +68,7 @@ describe('free-router command boundary', () => {
       eligibleModelIds: [],
       previousModelIds: [],
       registrationKind: 'none',
+      registrationReason: 'Bearer secret reason',
       failures: [],
       sensitive: 'api-key-should-not-appear',
     } as Parameters<typeof createRefreshReport>[0])
@@ -74,6 +77,7 @@ describe('free-router command boundary', () => {
     expect(empty.text).toContain('no refresh report')
     const refreshResult = await registry.command!.handler(invocation('refresh'))
     expect(refreshResult.text).not.toContain('api-key-should-not-appear')
+    expect(refreshResult.text).not.toContain('secret reason')
     const unknown = await registry.command!.handler(invocation('refresh now'))
     expect(unknown.kind).toBe('error')
     expect(unknown.text).toBe('usage: /free-router refresh | status')
