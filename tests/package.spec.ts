@@ -17,7 +17,11 @@ describe('package manifest', () => {
   })
 
   it('publishes the entry path declared in its manifest', async () => {
-    await access(resolve(import.meta.dirname, '..', 'dist', 'index.js'))
+    const entryPath = resolve(import.meta.dirname, '..', 'dist', 'index.js')
+    await access(entryPath)
+    const entry = await readFile(entryPath, 'utf8')
+    expect(entry).toContain('usage: /free-router refresh | status')
+    expect(entry).toContain('refresh and inspect free-router model discovery')
   })
 
   it('documents dynamic OpenRouter registration', async () => {
