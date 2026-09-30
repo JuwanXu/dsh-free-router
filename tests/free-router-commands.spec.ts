@@ -89,4 +89,15 @@ describe('free-router command boundary', () => {
     expect(output.kind).toBe('error')
     expect(output.text).not.toContain('secret token xyz')
   })
+
+  it('sanitizes status failures instead of rejecting the handler promise', async () => {
+    const registry = new FakeRegistry()
+    registerFreeRouterCommands(registry, {
+      refresh: async () => report(),
+      status: () => { throw new Error('secret status token') },
+    })
+    const output = await registry.command!.handler({ rawInput: 'status' })
+    expect(output.kind).toBe('error')
+    expect(output.text).not.toContain('secret status token')
+  })
 })

@@ -45,18 +45,20 @@ export function registerFreeRouterCommands(registry: FreeRouterCommandRegistry, 
     input: { hint: 'refresh | status' },
     handler: async ({ rawInput }) => {
       const input = rawInput.trim()
-      if (input === 'status') {
-        const report = view.status()
-        return report === undefined
-          ? { kind: 'success', text: 'no refresh report' }
-          : { kind: 'success', text: renderReport(report) }
-      }
-      if (input !== 'refresh') return { kind: 'error', text: usage }
       try {
-        const report = await view.refresh()
-        return { kind: 'success', text: renderReport(report) }
+        if (input === 'status') {
+          const report = view.status()
+          return report === undefined
+            ? { kind: 'success', text: 'no refresh report' }
+            : { kind: 'success', text: renderReport(report) }
+        }
+        if (input === 'refresh') {
+          const report = await view.refresh()
+          return { kind: 'success', text: renderReport(report) }
+        }
+        return { kind: 'error', text: usage }
       } catch {
-        return { kind: 'error', text: 'free-router refresh failed' }
+        return { kind: 'error', text: 'free-router command failed' }
       }
     },
   })
