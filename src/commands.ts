@@ -56,7 +56,9 @@ export function registerFreeRouterCommands(registry: FreeRouterCommandRegistry, 
         }
         if (input === 'refresh') {
           const report = await view.refresh()
-          return { kind: 'success', text: renderReport(report) }
+          const failed = report.registrationKind === 'error'
+            || report.failures.some(({ provider }) => provider === 'refresh')
+          return { kind: failed ? 'error' : 'success', text: renderReport(report) }
         }
         return { kind: 'error', text: usage }
       } catch {

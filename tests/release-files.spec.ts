@@ -24,8 +24,13 @@ describe('release files', () => {
   })
 
   it('documents the 0.1.3 desktop release gate for the author', async () => {
-    const checklist = await readFile(resolve(import.meta.dirname, '..', 'docs', 'release-checklist.md'), 'utf8')
+    const root = resolve(import.meta.dirname, '..')
+    const checklist = await readFile(resolve(root, 'docs', 'release-checklist.md'), 'utf8')
     expect(checklist).toContain('allow-version dsh-free-router@0.1.3 --dsh-version 0.2.0-rc.2 --accept-risk')
     expect(checklist).toContain('npm publish')
+    for (const file of ['README.md', 'docs/README.zh-CN.md', 'docs/release-checklist.md']) {
+      const content = await readFile(resolve(root, file), 'utf8')
+      expect(content.indexOf('allow-version dsh-free-router@0.1.3')).toBeLessThan(content.indexOf('add file:/absolute/path/dsh-free-router-0.1.3.tgz'))
+    }
   })
 })

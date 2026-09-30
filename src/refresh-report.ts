@@ -32,6 +32,7 @@ export interface CreateRefreshReportInput {
   eligibleModelIds: readonly string[]
   candidateCount?: number
   previousModelIds: readonly string[]
+  registeredModelIds: readonly string[]
   registrationKind: RegistrationRefreshKind
   registrationReason?: string
   failures: readonly { provider: string; code?: unknown }[]
@@ -49,7 +50,8 @@ export function createRefreshReport(input: CreateRefreshReportInput): RefreshRep
   const discovered = sortedUnique(input.discoveredModelIds)
   const eligible = sortedUnique(input.eligibleModelIds)
   const previous = new Set(input.previousModelIds)
-  const current = new Set(discovered)
+  const registered = sortedUnique(input.registeredModelIds)
+  const current = new Set(registered)
   return {
     startedAt: input.startedAt,
     completedAt: input.completedAt,
@@ -58,7 +60,7 @@ export function createRefreshReport(input: CreateRefreshReportInput): RefreshRep
     candidateCount: input.candidateCount ?? 0,
     registrationKind: input.registrationKind,
     registration: { kind: input.registrationKind, ...(input.registrationReason !== undefined && safeRegistrationReasons.has(input.registrationReason) ? { reason: input.registrationReason } : {}) },
-    addedModelIds: discovered.filter((modelId) => !previous.has(modelId)),
+    addedModelIds: registered.filter((modelId) => !previous.has(modelId)),
     removedModelIds: sortedUnique(input.previousModelIds).filter((modelId) => !current.has(modelId)),
     failures: input.failures.map(({ provider, code }) => ({ provider, code: safeFailureCode(code) }))
       .sort((left, right) => left.provider.localeCompare(right.provider) || left.code.localeCompare(right.code)),

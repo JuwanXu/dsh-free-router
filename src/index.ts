@@ -6,6 +6,7 @@ import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { CatalogRegistry } from './catalog/registry.js'
+import { allowedOpenRouterModelId } from './catalog/openrouter.js'
 import { registerFreeRouterCommands, type FreeRouterCommandRegistry } from './commands.js'
 import { createRefreshReport, type CreateRefreshReportInput, type RefreshReport } from './refresh-report.js'
 import {
@@ -107,6 +108,26 @@ function sourceCatalogCandidates(candidates: readonly CandidateModel[], config: 
   const sources = new Map<string, string>(providerDescriptors.map(({ key, source }) => [config.providers[key].route, source]))
   if (config.registration.openrouter.enabled) sources.set(config.registration.openrouter.route, 'openrouter')
   return candidates.map((candidate) => ({ ...candidate, provider: sources.get(candidate.provider) ?? candidate.provider }))
+}
+
+function respectsCatalogPolicy(candidate: CandidateModel, config: RouterConfig): boolean {
+  const openrouterRoutes = [
+    'openrouter',
+    config.providers.openrouter.route,
+    config.registration.openrouter.route,
+  ]
+  return !openrouterRoutes.includes(candidate.provider)
+    || allowedOpenRouterModelId(candidate.model, config.catalog.zeroPricedWithoutSuffix)
+}
+
+function managedProfileModelIds(profile: unknown): string[] {
+  if (profile === null || typeof profile !== 'object' || Array.isArray(profile)) return []
+  const models = (profile as { models?: unknown }).models
+  if (!Array.isArray(models)) return []
+  return models.flatMap((model: unknown) => model !== null && typeof model === 'object'
+    && typeof (model as { id?: unknown }).id === 'string'
+    ? [(model as { id: string }).id]
+    : [])
 }
 
 function enabledSources(config: RouterConfig): Set<string> {
@@ -228,8 +249,14 @@ function safeErrorCode(error: unknown): string {
 
 /** Register request-level free-model routing on top of existing DSH LLM adapters. */
 export function apply(ctx: Context, entry: RouterConfig): void {
-  let current: () => RouterConfig = () => parseConfig(entry)
+  let lastValidConfig = parseConfig(entry)
+  let current: () => RouterConfig = () => lastValidConfig
   let candidates: CandidateModel[] = []
+  const routableCandidates = (): CandidateModel[] => {
+    let config = lastValidConfig
+    try { config = current() } catch { /* 保留最后一次有效配置下的候选视图。 */ }
+    return candidates.filter((candidate) => respectsCatalogPolicy(candidate, config))
+  }
   let refreshGeneration = 0
   let refreshInFlight = false
   let refreshQueued = false
@@ -253,11 +280,12 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   const cache = new FileRouterCache(dshHomePath('cache', 'free-router.json'), 24 * 60 * 60_000)
   const persistCache = (): void => {
     if (refreshAbort.signal.aborted) return
+    const activeCandidates = routableCandidates()
     const task = cache.save({
       version: 2,
       updatedAt: Date.now(),
-      candidates,
-      health: health.snapshots(candidates.map(candidateKey), Date.now()),
+      candidates: activeCandidates,
+      health: health.snapshots(activeCandidates.map(candidateKey), Date.now()),
       registrations: cachedManagedClaim === undefined ? {} : { openrouter: cachedManagedClaim },
     }).catch((error) => logger.warn(`free-router: 缓存保存失败（错误码：${safeErrorCode(error)}）`))
     cacheTasks.add(task)
@@ -268,11 +296,11 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   }
   let triggerRefresh: () => Promise<RefreshReport> = async () => lastReport ?? createRefreshReport({
     startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
-    previousModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
+    previousModelIds: [], registeredModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
   })
   const runtime = createRouterRuntime({
     getConfig: () => effectiveRoutes(current(), registrationSettings !== undefined),
-    getCandidates: () => candidates,
+    getCandidates: routableCandidates,
     health,
     onHealthChange: persistCache,
     onUnknownModel: (unknown) => {
@@ -321,6 +349,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     if (initialRefreshCompleted) return
     const known = new Set(candidates.map(candidateKey))
     candidates = [...candidates, ...record.candidates.filter((candidate) => !known.has(candidateKey(candidate)))]
+    candidates = routableCandidates()
     runtime.wake()
   }).catch((error) => {
     if (!refreshAbort.signal.aborted) logger.warn(`free-router: 缓存加载失败（错误码：${safeErrorCode(error)}）`)
@@ -335,7 +364,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     const startedAt = pendingReport?.startedAt ?? Date.now()
     let draft: Omit<CreateRefreshReportInput, 'completedAt'> = pendingReport ?? {
       startedAt, discoveredModelIds: [], eligibleModelIds: [],
-      previousModelIds: lastDiscovered.map((candidate) => candidate.model),
+      previousModelIds: [], registeredModelIds: [],
       registrationKind: 'skipped', failures: [],
     }
     const failures = [...draft.failures]
@@ -343,12 +372,12 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       pendingReport = undefined
       persistCache()
       runtime.wake()
-      return createRefreshReport({ ...draft, failures, candidateCount: candidates.length, completedAt: Date.now() })
+      return createRefreshReport({ ...draft, failures, candidateCount: routableCandidates().length, completedAt: Date.now() })
     }
     try {
-      const previous = sourceCatalogCandidates(candidates, config)
+      const previous = sourceCatalogCandidates(routableCandidates(), config)
       const discovered = !verifying
-        ? await catalog.discover(enabledSources(config), refreshAbort.signal, previous, (provider) => {
+        ? (await catalog.discover(enabledSources(config), refreshAbort.signal, previous, (provider) => {
           failures.push({ provider, code: 'UNKNOWN' })
           const descriptor = providerDescriptors.find(({ source }) => source === provider)
           if (generation !== refreshGeneration
@@ -356,8 +385,8 @@ export function apply(ctx: Context, entry: RouterConfig): void {
             || descriptor === undefined
             || !current().providers[descriptor.key].enabled) return
           warn(`catalog:${provider}`, `${provider} 模型目录刷新失败；继续保留上次验证通过的快照`)
-        })
-        : lastDiscovered
+        })).filter((candidate) => respectsCatalogPolicy(candidate, config))
+        : lastDiscovered.filter((candidate) => respectsCatalogPolicy(candidate, config))
       if (generation !== refreshGeneration || refreshAbort.signal.aborted) return
 
       if (!verifying) {
@@ -371,6 +400,8 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       const registration = config.registration.openrouter
       if (registrationSettings !== undefined && registration.enabled && !verifying) {
         const profiles = providerProfiles(registrationSettings.get('llm-pi-ai'))
+        const registeredModelIds = managedProfileModelIds(profiles?.[registration.route])
+        draft = { ...draft, previousModelIds: registeredModelIds, registeredModelIds }
         const sourceRoute = config.providers.openrouter.route
         const sourceProfile = profiles?.[sourceRoute]
         if (profiles === undefined
@@ -411,6 +442,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
           }
           if (refreshAbort.signal.aborted) return
           cachedManagedClaim = reconciliation.claim
+          pendingReport = { ...draft, registeredModelIds: reconciliation.claim.modelIds, failures }
           persistCache()
           if (generation === refreshGeneration) void scheduleRefresh(undefined, true)
           return
@@ -427,6 +459,13 @@ export function apply(ctx: Context, entry: RouterConfig): void {
         refreshAbort.signal,
         config.health.timeoutMs,
       )
+      if (verifying && registrationSettings !== undefined && pendingManagedAdapterVerification !== undefined) {
+        const profiles = providerProfiles(registrationSettings.get('llm-pi-ai'))
+        draft = {
+          ...draft,
+          registeredModelIds: managedProfileModelIds(profiles?.[pendingManagedAdapterVerification.targetRoute]),
+        }
+      }
       for (const issueDetail of executable.issues) {
         const { source, route, issue } = issueDetail
         const descriptor = providerDescriptors.find((item) => item.source === source)
@@ -491,7 +530,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       logger.warn(`free-router: 模型目录刷新失败，继续使用已知候选（错误码：${safeErrorCode(error)}）`)
       return createRefreshReport({
         startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
-        previousModelIds: [], candidateCount: candidates.length, registrationKind: 'skipped',
+        previousModelIds: [], registeredModelIds: [], candidateCount: routableCandidates().length, registrationKind: 'skipped',
         failures: [{ provider: 'refresh', code: safeErrorCode(error) }],
       })
     }).then((report) => {
@@ -516,7 +555,7 @@ export function apply(ctx: Context, entry: RouterConfig): void {
   }
   const cancelledReport = (): RefreshReport => createRefreshReport({
     startedAt: Date.now(), completedAt: Date.now(), discoveredModelIds: [], eligibleModelIds: [],
-    previousModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
+    previousModelIds: [], registeredModelIds: [], registrationKind: 'skipped', failures: [{ provider: 'refresh', code: 'ABORT_ERR' }],
   })
   const scheduleRefresh = (intent?: IsolationRefreshIntent, verificationOnly = false): Promise<RefreshReport> => {
     if (refreshAbort.signal.aborted) return Promise.resolve(cancelledReport())
@@ -550,7 +589,10 @@ export function apply(ctx: Context, entry: RouterConfig): void {
     registrationSettings = settingsCtx.settings as unknown as RegistrationSettings
     settingsCtx.settings.installSection(ctx, FREE_ROUTER_SETTINGS_NAMESPACE, ConfigSchema, current(), {
       setSource: (source) => {
-        current = () => parseConfig(source())
+        current = () => {
+          lastValidConfig = parseConfig(source())
+          return lastValidConfig
+        }
       },
       onChange: () => scheduleRefresh('topology'),
     })

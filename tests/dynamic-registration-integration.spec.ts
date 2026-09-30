@@ -91,6 +91,8 @@ async function startPlugin(options: {
   logger?: boolean
   holdProbes?: boolean
   commands?: boolean | 'throw'
+  initialCatalogFailure?: boolean
+  readManagedProfileModels?: boolean
 } = {}): Promise<StartedPlugin> {
   let activeConfig = options.config ?? registrationConfig()
   let command: StartedPlugin['command']
@@ -104,7 +106,7 @@ async function startPlugin(options: {
   }
   const mutations: StartedPlugin['mutations'] = []
   const modelReads = new Map<string, number>()
-  let catalogFailure = false
+  let catalogFailure = options.initialCatalogFailure === true
   let mutationFailure = false
   let catalogReadCount = 0
   let catalogGate: { wait: Promise<void>, started: () => void } | undefined
@@ -175,9 +177,12 @@ async function startPlugin(options: {
         gate.started()
         await gate.wait
       }
-      return route === managedRoute
-        ? [{ provider: managedRoute, id: 'first:free', name: 'First Free' }, { provider: managedRoute, id: 'second:free', name: 'Second Free' }]
-        : []
+      if (route !== managedRoute) return []
+      if (options.readManagedProfileModels) {
+        const providers = (document['llm-pi-ai'] as { providers: Record<string, { models?: { id: string, name: string }[] }> }).providers
+        return (providers[managedRoute]?.models ?? []).map((model) => ({ provider: managedRoute, id: model.id, name: model.name }))
+      }
+      return [{ provider: managedRoute, id: 'first:free', name: 'First Free' }, { provider: managedRoute, id: 'second:free', name: 'Second Free' }]
     },
     stream: async function* (streamOptions: { model?: string }) {
       if (options.holdProbes === true) await probesReleased
@@ -252,7 +257,7 @@ describe('dynamic free-model registration', () => {
 
   it('manual refresh removes a zero-priced suffixless model after the catalog policy is disabled', async () => {
     process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-policy`)
-    const started = await startPlugin({ commands: true })
+    const started = await startPlugin({ commands: true, readManagedProfileModels: true })
     expect(started.command?.name).toBe('free-router')
     started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
     const output = await started.command!.handler({ rawInput: 'refresh' })
@@ -265,6 +270,52 @@ describe('dynamic free-model registration', () => {
     const status = await started.command!.handler({ rawInput: 'status' })
     expect(status.text).toContain('registration: update')
     expect(started.catalogReads()).toBe(catalogReads)
+    await started.dispose()
+  })
+
+  it('enforces suffix policy on a failed-catalog snapshot and keeps eligible free models', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-failed-policy`)
+    const started = await startPlugin({ commands: true, readManagedProfileModels: true })
+    started.failCatalog()
+    started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    const profile = (started.document['llm-pi-ai'] as { providers: Record<string, { models: { id: string }[] }> }).providers[managedRoute]
+    expect(profile.models.map((model) => model.id)).toEqual(['first:free', 'second:free'])
+    expect(output.text).toContain('removed: stealth/space-bunny-alpha')
+    expect(output.text).toContain('openrouter:UNKNOWN')
+    expect(output.kind).toBe('success')
+    expect((await requestThroughWaterfall(started.ctx)).model).not.toBe('stealth/space-bunny-alpha')
+    await started.dispose()
+  })
+
+  it('filters a cached managed candidate before the first successful catalog request', async () => {
+    const home = join(tmpdir(), `dsh-free-router-test-${Date.now()}-cached-policy`)
+    process.env.DSH_HOME = home
+    const first = await startPlugin({ readManagedProfileModels: true })
+    const target = (first.document['llm-pi-ai'] as { providers: Record<string, unknown> }).providers[managedRoute]
+    await first.dispose()
+    const second = await startPlugin({
+      config: parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }),
+      targetProfile: target,
+      initialCatalogFailure: true,
+      commands: true,
+      readManagedProfileModels: true,
+    })
+    const output = await second.command!.handler({ rawInput: 'refresh' })
+    expect(output.text).toContain('candidates: 2')
+    expect((await requestThroughWaterfall(second.ctx)).model).not.toBe('stealth/space-bunny-alpha')
+    await second.dispose()
+  })
+
+  it('reports the models actually removed by routing exclusions', async () => {
+    process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-excluded-delta`)
+    const started = await startPlugin({ commands: true })
+    started.updateConfig(registrationConfig({ excludeModels: ['stealth/space-bunny-alpha'] }))
+    const output = await started.command!.handler({ rawInput: 'refresh' })
+    const profile = (started.document['llm-pi-ai'] as { providers: Record<string, { models: { id: string }[] }> }).providers[managedRoute]
+    expect(profile.models.map((model) => model.id)).not.toContain('stealth/space-bunny-alpha')
+    expect(output.text).toContain('registration: update')
+    expect(output.text).toContain('removed: stealth/space-bunny-alpha')
     await started.dispose()
   })
 
@@ -326,6 +377,7 @@ describe('dynamic free-model registration', () => {
     const started = await startPlugin({ commands: true, logger: true })
     started.failCatalog()
     const failed = await started.command!.handler({ rawInput: 'refresh' })
+    expect(failed.kind).toBe('success')
     expect(failed.text).toContain('openrouter:UNKNOWN')
     expect(failed.text).toContain('candidates: 2')
     expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
@@ -350,17 +402,21 @@ describe('dynamic free-model registration', () => {
 
   it('reports a rejected managed write with a safe code and preserves known candidates', async () => {
     process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-write-failure`)
-    const started = await startPlugin({ commands: true, logger: true })
+    const started = await startPlugin({ commands: true, logger: true, readManagedProfileModels: true })
     const baselineWrites = started.mutations.length
     started.failMutation()
     started.updateConfig(parseConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: false } }))
     const output = await started.command!.handler({ rawInput: 'refresh' })
     expect(output.text).toContain('registration: error')
     expect(output.text).toContain('registration:EIO')
+    expect(output.kind).toBe('error')
+    expect(output.text).toContain('removed: none')
+    expect(output.text).toContain('added: none')
     expect(output.text).toContain('candidates: 2')
     expect(output.text).not.toContain('mutation-secret')
     expect(started.mutations).toHaveLength(baselineWrites)
     expect(await requestThroughWaterfall(started.ctx)).toMatchObject({ provider: managedRoute })
+    expect((await requestThroughWaterfall(started.ctx)).model).not.toBe('stealth/space-bunny-alpha')
     await started.dispose()
   })
 
@@ -372,6 +428,7 @@ describe('dynamic free-model registration', () => {
     await gate.started
     await started.dispose()
     const output = await response
+    expect(output.kind).toBe('error')
     expect(output.text).toContain('registration: skipped')
     expect(output.text).toContain('refresh:ABORT_ERR')
     gate.release()
@@ -382,6 +439,7 @@ describe('dynamic free-model registration', () => {
     const started = await startPlugin({ commands: true, logger: true })
     started.updateConfig({ ...registrationConfig(), catalog: { zeroPricedWithoutSuffix: 'invalid' } } as unknown as RouterConfig)
     const output = await started.command!.handler({ rawInput: 'refresh' })
+    expect(output.kind).toBe('error')
     expect(output.text).toContain('refresh:UNKNOWN')
     expect(output.text).toContain('candidates: 2')
     expect(output.text).not.toContain('invalid')

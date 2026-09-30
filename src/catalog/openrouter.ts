@@ -18,13 +18,16 @@ function zeroPrice(value: unknown): boolean {
   return Number.isFinite(parsed) && parsed === 0
 }
 
+export function allowedOpenRouterModelId(id: string, zeroPricedWithoutSuffix: boolean): boolean {
+  return id !== 'openrouter/free' && (id.endsWith(':free') || zeroPricedWithoutSuffix)
+}
+
 function modelFrom(value: OpenRouterModel, updatedAt: number, zeroPricedWithoutSuffix: boolean): CandidateModel | undefined {
-  if (typeof value.id !== 'string' || value.id === 'openrouter/free') return undefined
+  if (typeof value.id !== 'string' || !allowedOpenRouterModelId(value.id, zeroPricedWithoutSuffix)) return undefined
   if (!value.pricing || !zeroPrice(value.pricing.prompt) || !zeroPrice(value.pricing.completion)) return undefined
   if (!Array.isArray(value.supported_parameters) || !value.supported_parameters.includes('tools')) return undefined
   const contextWindow = value.context_length
   if (typeof contextWindow !== 'number' || !Number.isSafeInteger(contextWindow) || contextWindow <= 0) return undefined
-  if (!value.id.endsWith(':free') && !zeroPricedWithoutSuffix) return undefined
 
   return {
     provider: 'openrouter',
