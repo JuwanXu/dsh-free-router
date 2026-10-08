@@ -162,8 +162,8 @@ dsh --profile web --host 127.0.0.1 --port 3082
 ```bash
 pnpm run check
 pnpm pack
-dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.3 --dsh-version 0.2.0-rc.2 --accept-risk
-dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.3.tgz
+dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.4 --dsh-version 0.2.0-rc.2 --accept-risk
+dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.4.tgz
 ```
 
 使用该 profile 打开 Desktop App 并运行 `/free-router refresh` 验证。发布步骤仅供作者执行，见[作者发布检查清单](./release-checklist.md)。

@@ -164,8 +164,8 @@ For DSH Desktop `0.2.0-rc.2`, install a locally packed build into a temporary pr
 ```bash
 pnpm run check
 pnpm pack
-dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.3 --dsh-version 0.2.0-rc.2 --accept-risk
-dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.3.tgz
+dsh plugin --profile <temporary-profile> allow-version dsh-free-router@0.1.4 --dsh-version 0.2.0-rc.2 --accept-risk
+dsh plugin --profile <temporary-profile> add file:/absolute/path/dsh-free-router-0.1.4.tgz
 ```
 
 Open the Desktop app with that profile and run `/free-router refresh` to verify it. See the [author-only release checklist](./docs/release-checklist.md); only the package author should publish.

@@ -4,8 +4,8 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 describe('package manifest', () => {
-  it('prepares the 0.1.3 package with the command module and both README files', () => {
-    expect(manifest.version).toBe('0.1.3')
+  it('prepares the 0.1.4 package with the command module and both README files', () => {
+    expect(manifest.version).toBe('0.1.4')
     expect(manifest.files).toContain('README.md')
     expect(manifest.files).toContain('docs/README.zh-CN.md')
   })
