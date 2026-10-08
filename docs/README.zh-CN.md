@@ -8,7 +8,7 @@
 - 只选择免费、确认支持 tool calling、并满足上下文和 Tier 约束的模型。
 - 每次主 Agent 请求按“可用性 → Tier → 首分片平均延迟 → 成功率”排序。
 - 遇到 `RATE_LIMIT`、`SERVER`、`TIMEOUT`、`TRANSPORT`、鉴权或配额等可恢复故障时，切换同一步尚未尝试过的候选。
-- 每个 `turn/step` 默认最多尝试 4 个模型，并在 Session 中追加非 surface 的 `free-router/selected` 与 `free-router/failover` 事件。
+- 每个 `turn/step` 默认最多尝试 4 个模型。选路信息不会写入 DSH 的持久化 Session 事件日志，避免不同 Harness 版本恢复会话时出现未知事件错误。
 - 不路由 session title、compaction 和其他辅助调用；它们也不参与健康指标。
 - 不保存 API key、Authorization header 或原始请求。缓存只允许模型目录与健康摘要。
 

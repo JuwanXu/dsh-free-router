@@ -2,7 +2,6 @@ import type { Context, Logger } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-llm'
-import type { Session } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { CatalogRegistry } from './catalog/registry.js'
@@ -28,10 +27,7 @@ import {
 import type { ManagedRouteClaim } from './registration/types.js'
 import { createRouterRuntime } from './runtime/router.js'
 import { candidateKey, type CandidateModel } from './types.js'
-import type { RouterFailoverEvent, RouterSelectionEvent } from './runtime/router.js'
 import { providerCatalogSources, providerDescriptors } from './providers.js'
-import { toFreeRouterMetrics } from './events.js'
-import './events.js'
 
 export const name = 'free-router'
 export const inject = ['llm']
@@ -309,8 +305,6 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       persistCache()
       triggerRefresh()
     },
-    onSelected: (event) => appendSelectionEvent(event, logger),
-    onFailover: (event) => appendFailoverEvent(event, logger),
     onExhausted: (event) => {
       warn(
         `exhausted:${event.failureCode}:${event.attemptedCandidates.join(',')}`,
@@ -649,43 +643,4 @@ export function apply(ctx: Context, entry: RouterConfig): void {
       scheduleRefresh()
     }
   })
-}
-
-function appendSelectionEvent(event: RouterSelectionEvent, logger: Logger): void {
-  const session = (event.agent as { session?: Session }).session
-  if (session === undefined) return
-  try {
-    session.append('free-router/selected', {
-      turn: event.turn,
-      step: event.step,
-      attempt: event.attempt,
-      provider: event.candidate.provider,
-      model: event.candidate.model,
-      reason: event.reason,
-      metrics: toFreeRouterMetrics(event.metrics),
-    })
-  } catch (error) {
-    logger.warn(`free-router: 追加选路事件失败（错误码：${safeErrorCode(error)}）`)
-  }
-}
-
-function appendFailoverEvent(event: RouterFailoverEvent, logger: Logger): void {
-  const session = (event.agent as { session?: Session }).session
-  if (session === undefined) return
-  try {
-    session.append('free-router/failover', {
-      turn: event.turn,
-      step: event.step,
-      attempt: event.attempt,
-      provider: event.failedCandidate.provider,
-      model: event.failedCandidate.model,
-      failureCode: event.failureCode,
-      isolatedScope: event.isolatedScope,
-      nextProvider: event.nextCandidate.provider,
-      nextModel: event.nextCandidate.model,
-      attempts: event.attempts,
-    })
-  } catch (error) {
-    logger.warn(`free-router: 追加故障转移事件失败（错误码：${safeErrorCode(error)}）`)
-  }
 }

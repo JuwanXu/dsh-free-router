@@ -10,7 +10,7 @@ A DeepSeek Harness plugin for request-level routing and failover across free mod
 - Selects only free models that are confirmed to support tool calling and satisfy the context-window and tier constraints.
 - Ranks each primary-agent request by availability, tier, average first-token latency, then success rate.
 - On recoverable `RATE_LIMIT`, `SERVER`, `TIMEOUT`, `TRANSPORT`, authentication, or quota failures, switches to an untried candidate in the same step.
-- Attempts at most four models per `turn/step` by default and appends non-surface `free-router/selected` and `free-router/failover` events to the session.
+- Attempts at most four models per `turn/step` by default. Routing decisions stay out of the durable DSH session event log so sessions remain restorable across Harness versions.
 - Does not route session titles, compaction, or other auxiliary calls; those calls do not affect health metrics.
 - Never stores API keys, Authorization headers, or raw requests. The cache is limited to model catalog data and health summaries.
 

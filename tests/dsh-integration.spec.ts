@@ -64,13 +64,13 @@ describe('DSH integration', () => {
 
     const fallback = await waterfall(ctx, 'agent/request', request, async () => original)
     expect(fallback).toMatchObject({ provider: 'nvidia', model: 'deepseek-ai/deepseek-v3.2' })
-    expect(events.map(({ type }) => type)).toEqual(['free-router/selected', 'free-router/failover', 'free-router/selected'])
+    expect(events).toEqual([])
     expect(JSON.stringify(events)).not.toContain('slow down')
     expect(JSON.stringify(events)).not.toContain('recovery')
     await fiber.dispose()
   })
 
-  it('does not expose event append error details in diagnostics', async () => {
+  it('does not write session telemetry that the harness cannot restore', async () => {
     vi.stubGlobal('fetch', async () => new Response(JSON.stringify({ data: [] }), { status: 200 }))
     process.env.DSH_HOME = join(tmpdir(), `dsh-free-router-test-${Date.now()}-safe-errors`)
     vi.resetModules()
@@ -93,13 +93,9 @@ describe('DSH integration', () => {
     await fiber
     await waitForCatalog()
 
-    const secret = 'PRIVATE_DIAGNOSTIC_0123456789'
+    const appendCalls: unknown[][] = []
     const agent = {
-      session: {
-        append: () => {
-          throw Object.assign(new Error(`Bearer ${secret}; prompt body`), { code: secret })
-        },
-      },
+      session: { append: (...args: unknown[]) => { appendCalls.push(args) } },
     }
     const waterfall = ctx.events.waterfall.bind(ctx.events) as (
       thisArg: object,
@@ -115,8 +111,8 @@ describe('DSH integration', () => {
       .filter((message) => message.type === 'warn')
       .flatMap((message) => message.args.map(String))
       .join('\n')
-    expect(diagnostics).not.toMatch(/PRIVATE_DIAGNOSTIC_0123456789|Bearer|prompt body/)
-    expect(diagnostics).toContain('UNKNOWN')
+    expect(appendCalls).toEqual([])
+    expect(diagnostics).not.toContain('追加选路事件')
     await fiber.dispose()
   })
 

@@ -98,7 +98,7 @@ describe('Agent Loop integration', () => {
       expect(handle.agent.session.events
         .map((event) => event.type)
         .filter((type) => type.startsWith('free-router/')))
-        .toEqual(['free-router/selected', 'free-router/failover', 'free-router/selected'])
+        .toEqual([])
       const assistantHistory = handle.agent.session.deriveMessages()
         .filter((message) => message.role === 'assistant')
       expect(assistantHistory).toHaveLength(1)
